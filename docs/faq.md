@@ -22,15 +22,34 @@ For most highly concurrent workloads, we recommend increasing the default timeou
 FIPS endpoints are not supported for non-US and Canada regions since it is a US and Canadian government standard. If you have to use FIPS-enabled communication in regions without FIPS endpoints support, we provide a workaround at your own risk:
 
 ### Use non-FIPS endpoint in control plane but still enable FIPS in data plane in efs-utils
-In `controller-deployment.yaml` and `node-daemonset.yaml`, remove the `AWS_USE_FIPS_ENDPOINT` environment variable and add `FIPS_ENABLED` with value `true`. 
-
+In `controller-deployment.yaml`, remove `AWS_USE_FIPS_ENDPOINT` from `env`:
 ```yaml
-# Remove env: 
-# -  name: AWS_USE_FIPS_ENDPOINT
-#    value: "true"
+# Remove:
+# - name: AWS_USE_FIPS_ENDPOINT
+#   value: "true"
+```
+
+In `node-daemonset.yaml`, remove `AWS_USE_FIPS_ENDPOINT` and add `FIPS_ENABLED` in `env`:
+```yaml
+# Remove:
+# - name: AWS_USE_FIPS_ENDPOINT
+#   value: "true"
+
 # Add:
 - name: FIPS_ENABLED
-  value: "true" 
+  value: "true"
+```
+
+#### Helm upgrade example
+
+```bash
+helm upgrade --install aws-efs-csi-driver \
+  --namespace kube-system \
+  --version 4.0.1 \
+  --set useFIPS=false \
+  --set node.env[0].name=FIPS_ENABLED \
+  --set-string node.env[0].value=true \
+  aws-efs-csi-driver/aws-efs-csi-driver
 ```
 
 This configuration uses standard (non-FIPS) endpoints for control plane API calls to EFS and STS (avoiding regional FIPS endpoint availability issues) while maintaining full FIPS compliance for data plane mount traffic in [efs-utils](https://github.com/aws/efs-utils?tab=readme-ov-file#enabling-fips-mode) through three layers:

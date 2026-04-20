@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aws/smithy-go"
@@ -1708,6 +1709,97 @@ func Test_findAccessPointByPath(t *testing.T) {
 			}
 			if !reflect.DeepEqual(gotAccessPoint, tt.wantAccessPoint) {
 				t.Errorf("findAccessPointByClientToken() gotAccessPoint = %v, want %v", gotAccessPoint, tt.wantAccessPoint)
+			}
+		})
+	}
+}
+
+func TestValidateFIPSRegion(t *testing.T) {
+	tests := []struct {
+		name      string
+		region    string
+		envValue  string
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:     "FIPS not enabled, non-US region, no error",
+			region:   "eu-central-1",
+			envValue: "",
+			wantErr:  false,
+		},
+		{
+			name:     "FIPS enabled, US region, no error",
+			region:   "us-east-1",
+			envValue: "true",
+			wantErr:  false,
+		},
+		{
+			name:     "FIPS enabled, US west region, no error",
+			region:   "us-west-2",
+			envValue: "true",
+			wantErr:  false,
+		},
+		{
+			name:     "FIPS enabled, Canada region, no error",
+			region:   "ca-central-1",
+			envValue: "true",
+			wantErr:  false,
+		},
+		{
+			name:      "FIPS enabled, EU region, error",
+			region:    "eu-central-1",
+			envValue:  "true",
+			wantErr:   true,
+			errSubstr: "FIPS endpoints are not available in region eu-central-1",
+		},
+		{
+			name:      "FIPS enabled, AP region, error",
+			region:    "ap-southeast-1",
+			envValue:  "true",
+			wantErr:   true,
+			errSubstr: "FIPS endpoints are only supported in US and Canada regions",
+		},
+		{
+			name:     "FIPS enabled case-insensitive TRUE, US region, no error",
+			region:   "us-east-1",
+			envValue: "TRUE",
+			wantErr:  false,
+		},
+		{
+			name:      "FIPS enabled case-insensitive True, non-US region, error",
+			region:    "eu-west-1",
+			envValue:  "True",
+			wantErr:   true,
+			errSubstr: "AWS_USE_FIPS_ENDPOINT=false",
+		},
+		{
+			name:     "FIPS set to false, non-US region, no error",
+			region:   "eu-west-1",
+			envValue: "false",
+			wantErr:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envValue != "" {
+				t.Setenv("AWS_USE_FIPS_ENDPOINT", tt.envValue)
+			} else {
+				t.Setenv("AWS_USE_FIPS_ENDPOINT", "")
+			}
+
+			err := validateFIPSRegion(tt.region)
+			if tt.wantErr && err == nil {
+				t.Errorf("validateFIPSRegion() expected error but got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("validateFIPSRegion() unexpected error: %v", err)
+			}
+			if tt.wantErr && err != nil && tt.errSubstr != "" {
+				if !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Errorf("validateFIPSRegion() error = %q, want substring %q", err.Error(), tt.errSubstr)
+				}
 			}
 		})
 	}

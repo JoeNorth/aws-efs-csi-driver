@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"math/rand"
 	"os"
@@ -166,6 +167,10 @@ func createCloud(awsRoleArn string, externalId string, adaptiveRetryMode bool) (
 		return nil, fmt.Errorf("could not get metadata: %v", err)
 	}
 
+	if err := validateFIPSRegion(metadata.GetRegion()); err != nil {
+		return nil, err
+	}
+
 	rm := newRetryManager(adaptiveRetryMode)
 
 	efs_client := createEfsClient(awsRoleArn, externalId, metadata)
@@ -201,6 +206,27 @@ func createEfsClient(awsRoleArn string, externalId string, metadata MetadataServ
 func createS3FilesClient(metadata MetadataService) S3Files {
 	cfg, _ := config.LoadDefaultConfig(context.TODO(), config.WithRegion(metadata.GetRegion()))
 	return s3files.NewFromConfig(cfg)
+}
+
+// validateFIPSRegion checks if FIPS endpoints are requested in a non-US/Canada region
+// and returns a clear error if so, since FIPS endpoints are only available in those regions.
+func validateFIPSRegion(region string) error {
+	useFips := strings.EqualFold(os.Getenv("AWS_USE_FIPS_ENDPOINT"), "true")
+	if !useFips {
+		return nil
+	}
+	if isFIPSSupportedRegion(region) {
+		return nil
+	}
+	return fmt.Errorf("FIPS endpoints are not available in region %s. "+
+		"FIPS endpoints are only supported in US and Canada regions. "+
+		"To resolve this, either set AWS_USE_FIPS_ENDPOINT=false or deploy your workload in a FIPS-supported region", region)
+}
+
+// isFIPSSupportedRegion returns true if the region is in the US or Canada,
+// which are the only regions where FIPS endpoints are available. Refer to https://aws.amazon.com/compliance/fips/
+func isFIPSSupportedRegion(region string) bool {
+	return strings.HasPrefix(region, "us-") || strings.HasPrefix(region, "ca-")
 }
 
 func (c *cloud) GetMetadata() MetadataService {
