@@ -5,14 +5,12 @@ iam:
     - metadata:
         name: efs-csi-node-sa
         namespace: kube-system
-      wellKnownPolicies:
-        efsCSIController: true
       attachPolicyARNs:
-      - "arn:aws:iam::aws:policy/service-role/AmazonS3FilesCSIDriverPolicy"
+      - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      - arn:aws:iam::aws:policy/AmazonElasticFileSystemsUtils
     - metadata:
         name: efs-csi-controller-sa
         namespace: kube-system
-      wellKnownPolicies:
-        efsCSIController: true
       attachPolicyARNs:
-      - "arn:aws:iam::aws:policy/service-role/AmazonS3FilesCSIDriverPolicy"
+      - arn:aws:iam::aws:policy/service-role/AmazonS3FilesCSIDriverPolicy
+      - arn:aws:iam::aws:policy/service-role/AmazonEFSCSIDriverPolicy

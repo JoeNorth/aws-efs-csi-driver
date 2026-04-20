@@ -529,6 +529,80 @@ var _ = ginkgo.Describe("[efs-csi]", func() {
 						ginkgo.Fail(fmt.Sprintf("Writes did not resume after CSI driver restart. Last write was at %d, but expected a write after %d.", lastTimestamp, expectedMin))
 					}
 				})
+
+				ginkgo.It("should have efs-proxy logs containing ReadBypass enabled", func() {
+					if config.FSType != util.FileSystemTypeS3Files {
+						ginkgo.Skip("ReadBypass is only applicable to S3Files filesystem type")
+					}
+
+					labelSelector := buildLabelSelector(EfsDriverLabelSelectors)
+					allDriverPods, err := f.ClientSet.CoreV1().Pods(EfsDriverNamespace).List(context.TODO(), metav1.ListOptions{
+						LabelSelector: labelSelector,
+					})
+					framework.ExpectNoError(err, "listing all efs-csi-node pods")
+
+					ginkgo.By("Clearing efs-proxy logs on all efs-csi-node pods")
+					for _, dp := range allDriverPods.Items {
+						_, err := kubectl.RunKubectl(EfsDriverNamespace, "exec", dp.Name, "-c", "efs-plugin", "--", "find", "/var/log/amazon/efs", "-name", "fs-*.log*", "-delete")
+						if err != nil {
+							framework.Logf("Warning: failed to clear efs-proxy logs on pod %q: %v", dp.Name, err)
+							continue
+						}
+						framework.Logf("Cleared efs-proxy logs on pod %q", dp.Name)
+					}
+
+					ginkgo.By("Creating EFS PVC and PV")
+					pvc, pv, err := createEFSPVCPV(f.ClientSet, f.Namespace.Name, f.Namespace.Name, "/", map[string]string{}, config)
+					framework.ExpectNoError(err, "creating efs pvc & pv")
+					defer func() {
+						_ = f.ClientSet.CoreV1().PersistentVolumes().Delete(context.TODO(), pv.Name, metav1.DeleteOptions{})
+					}()
+
+					ginkgo.By("Creating a pod to mount the volume")
+					pod := e2epod.MakePod(f.Namespace.Name, nil, []*v1.PersistentVolumeClaim{pvc}, admissionapi.LevelBaseline, "while true; do echo $(date -u); sleep 5; done")
+					pod, err = f.ClientSet.CoreV1().Pods(f.Namespace.Name).Create(context.TODO(), pod, metav1.CreateOptions{})
+					framework.ExpectNoError(err, "creating pod")
+					framework.ExpectNoError(e2epod.WaitForPodNameRunningInNamespace(context.TODO(), f.ClientSet, pod.Name, f.Namespace.Name), "waiting for pod running")
+					defer func() {
+						_ = f.ClientSet.CoreV1().Pods(f.Namespace.Name).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
+					}()
+
+					ginkgo.By("Getting the node the pod is running on")
+					pod, err = f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+					framework.ExpectNoError(err, "getting pod")
+					nodeName := pod.Spec.NodeName
+					framework.Logf("Pod %q is running on node %q", pod.Name, nodeName)
+
+					ginkgo.By("Waiting for efs-proxy to initialize and collect logs. Sleeping for 120 seconds.")
+					time.Sleep(120 * time.Second)
+
+					ginkgo.By("Finding the efs-csi-node pod on the same node")
+					driverPods, err := f.ClientSet.CoreV1().Pods(EfsDriverNamespace).List(context.TODO(), metav1.ListOptions{
+						LabelSelector: labelSelector,
+						FieldSelector: "spec.nodeName=" + nodeName,
+					})
+					framework.ExpectNoError(err, "listing efs-csi-node pods")
+					if len(driverPods.Items) == 0 {
+						ginkgo.Fail(fmt.Sprintf("No efs-csi-node pod found on node %q with label selector %q", nodeName, labelSelector))
+					}
+					driverPod := driverPods.Items[0]
+					framework.Logf("Found efs-csi-node pod %q on node %q", driverPod.Name, nodeName)
+
+					ginkgo.By("Checking efs-proxy logs for ReadBypass enabled message")
+					expectedLog := "S3 bucket accessible. ReadBypass enabled."
+					grepCommand := fmt.Sprintf("cat /var/log/amazon/efs/fs-*.log* 2>/dev/null | grep -c '%s' || true", expectedLog)
+					output := strings.TrimSpace(kubectl.RunKubectlOrDie(EfsDriverNamespace, "exec", driverPod.Name, "-c", "efs-plugin", "--", "/bin/sh", "-c", grepCommand))
+					framework.Logf("Grep count for ReadBypass log: %s", output)
+
+					count, err := strconv.Atoi(output)
+					framework.ExpectNoError(err, "parsing grep count")
+					if count == 0 {
+						// Dump logs for debugging
+						allLogs := kubectl.RunKubectlOrDie(EfsDriverNamespace, "exec", driverPod.Name, "-c", "efs-plugin", "--", "/bin/sh", "-c", "cat /var/log/amazon/efs/fs-*.log* 2>/dev/null || echo 'No log files found'")
+						framework.Logf("efs-proxy logs:\n%s", allLogs)
+						ginkgo.Fail(fmt.Sprintf("Expected efs-proxy logs to contain %q but it was not found", expectedLog))
+					}
+				})
 			})
 		})
 	}
@@ -654,4 +728,15 @@ func makeDir(path string) error {
 		}
 	}
 	return nil
+}
+
+func buildLabelSelector(labels map[string]string) string {
+	selector := ""
+	for k, v := range labels {
+		if selector != "" {
+			selector += ","
+		}
+		selector += k + "=" + v
+	}
+	return selector
 }
