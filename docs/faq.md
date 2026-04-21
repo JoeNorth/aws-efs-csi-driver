@@ -9,8 +9,21 @@ Alternatively, if you would prefer not to allocate these resources to your contr
 For most highly concurrent workloads, we recommend increasing the default timeout argument set in the [external-provisioner](https://github.com/kubernetes-csi/external-provisioner) from 15 seconds to 60 seconds. This will avoid provisioning failures due to throttling and resource contention in the controller container. 
 
 ## Update Strategy
-* Amazon EFS CSI driver allows you to configure your [update strategy](https://kubernetes.io/docs/tasks/manage-daemon/update-daemon-set/#daemonset-update-strategy)
-* When setting update strategy to be ```OnDelete```, you must manually delete the csi-node and csi-controller pods in order for them to be updated
+* Amazon EFS CSI driver uses the `RollingUpdate` strategy and only allows you to configure parameters under [rolling update](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#rolling-update-deployment), such as `maxUnavailable` and `maxSurge`.
+* Changing the update strategy (e.g. to `OnDelete`) is not supported.
+
+## Efs-proxy OOMKilled under heavy NFS write workloads
+
+### Symptom
+When the `efs-csi-node` pod's memory limit is configured too low for the workload, the `efs-proxy` container may be OOMKilled under sustained NFS write traffic, particularly when multiple mounts share the same node. 
+
+This is a resource configuration issue. Under high write workloads, the kernel accumulates a write backlog that gets flushed into the proxy after it restarts, which can cause repeated OOMKills if the memory limit is not sized accordingly. Increasing the pod's memory limit to match your workload is the recommended solution in most cases.
+
+### Mitigation
+- (Recommended) Increase memory limits for the CSI node container to accommodate your workload
+- Force unmount the offending mount via the EKS node
+- Reduce `wsize` in mount option (1MiB by default) to lower the size of each NFS WRITE RPC, which reduces per-request memory consumption in the proxy buffer
+- Use `soft` mount or `timeo`+`retrans` mount options to limit kernel retry behavior
 
 ## Using botocore to retrieve mount target ip address when dns name cannot be resolved (Amazon EFS only)
 * Amazon EFS CSI driver supports using botocore to retrieve mount target ip address when dns name cannot be resolved, e.g., when user is mounting a file system in another VPC, botocore comes preinstalled on efs-csi-driver which can solve this DNS issue.
