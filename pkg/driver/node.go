@@ -117,6 +117,25 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 				return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("Volume context property %q=%q is not a valid IP address", k, v))
 			}
 			mountOptions = append(mountOptions, MountTargetIp+"="+v)
+		case MountTargetIpMap:
+			// Parse the AZ→IP map passed from the controller and select the mount target
+			// IP for this node's AZ. If no mount target exists in this AZ, fall back to
+			// any available mount target.
+			var ipMap map[string]string
+			if err := json.Unmarshal([]byte(v), &ipMap); err != nil {
+				return nil, status.Errorf(codes.InvalidArgument, "Failed to parse %s: %v", MountTargetIpMap, err)
+			}
+			nodeAZ := d.cloud.GetMetadata().GetAvailabilityZone()
+			if ip, ok := ipMap[nodeAZ]; ok {
+				mountOptions = append(mountOptions, MountTargetIp+"="+ip)
+			} else {
+				// No mount target in this node's AZ; pick any available one as fallback.
+				for az, ip := range ipMap {
+					klog.Warningf("No mount target IP for node AZ %s, falling back to AZ %s (IP %s)", nodeAZ, az, ip)
+					mountOptions = append(mountOptions, MountTargetIp+"="+ip)
+					break
+				}
+			}
 		case CrossAccount:
 			var err error
 			crossAccountDNSEnabled, err = strconv.ParseBool(v)

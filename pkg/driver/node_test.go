@@ -1533,3 +1533,95 @@ func TestGetCsiNodeEfsPluginContainerMemoryLimitInBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestNodePublishVolumeMountTargetIpMap(t *testing.T) {
+	stdVolCap := &csi.VolumeCapability{
+		AccessType: &csi.VolumeCapability_Mount{
+			Mount: &csi.VolumeCapability_MountVolume{},
+		},
+		AccessMode: &csi.VolumeCapability_AccessMode{
+			Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+		},
+	}
+
+	testCases := []struct {
+		name      string
+		nodeAZ    string
+		ipMapJSON string
+		// expected mounttargetip value in mount options, empty if none expected
+		expectedIP  string
+		expectError bool
+	}{
+		{
+			name:       "node AZ found in map",
+			nodeAZ:     "us-west-2b",
+			ipMapJSON:  `{"us-west-2a":"10.0.1.1","us-west-2b":"10.0.2.1","us-west-2c":"10.0.3.1"}`,
+			expectedIP: "10.0.2.1",
+		},
+		{
+			name:       "node AZ not in map falls back to a random available AZ",
+			nodeAZ:     "us-west-2d",
+			ipMapJSON:  `{"us-west-2a":"10.0.1.1"}`,
+			expectedIP: "10.0.1.1",
+		},
+		{
+			name:        "invalid JSON returns error",
+			nodeAZ:      "us-west-2a",
+			ipMapJSON:   `{invalid`,
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockCtrl := gomock.NewController(t)
+			defer mockCtrl.Finish()
+
+			t.Setenv("CSI_NODE_MEMORY_LIMIT", strconv.Itoa(minMemoryInBytesToEnableS3ReadCache*2))
+
+			mockMounter := mocks.NewMockMounter(mockCtrl)
+			mockCloud := mocks.NewMockCloud(mockCtrl)
+			mockCloud.EXPECT().GetMetadata().Return(&mockMetadata{availabilityZone: tc.nodeAZ}).AnyTimes()
+
+			driver := &Driver{
+				endpoint:             "endpoint",
+				nodeID:               "nodeID",
+				mounter:              mockMounter,
+				cloud:                mockCloud,
+				volMetricsOptIn:      true,
+				nodeCaps:             SetNodeCapOptInFeatures(true),
+				inFlightMountTracker: NewInFlightMountTracker(UnsetMaxInflightMountCounts),
+			}
+			ctx := context.Background()
+
+			req := &csi.NodePublishVolumeRequest{
+				VolumeId:         volumeId,
+				VolumeCapability: stdVolCap,
+				TargetPath:       targetPath,
+				VolumeContext: map[string]string{
+					"mounttargetipmap": tc.ipMapJSON,
+				},
+			}
+
+			if !tc.expectError {
+				expectedMountOpts := []string{"mounttargetip=" + tc.expectedIP, "tls"}
+				mockMounter.EXPECT().MakeDir(gomock.Eq(targetPath)).Return(nil)
+				mockMounter.EXPECT().Mount(volumeId+":/", targetPath, "efs", expectedMountOpts).Return(nil)
+			}
+
+			ret, err := driver.NodePublishVolume(ctx, req)
+			if tc.expectError {
+				if err == nil {
+					t.Fatal("Expected error but got nil")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Unexpected error: %v", err)
+				}
+				if ret == nil {
+					t.Fatal("Expected non-nil return value")
+				}
+			}
+		})
+	}
+}

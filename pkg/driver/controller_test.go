@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -5499,4 +5500,189 @@ func randStringBytes(n int) string {
 		b[i] = chars[rand.Intn(len(chars))]
 	}
 	return string(b)
+}
+
+func TestSelectMountTargetIP(t *testing.T) {
+	tests := []struct {
+		name         string
+		mountTargets []*cloud.MountTarget
+		preferredAZ  string
+		expectedIP   string
+	}{
+		{
+			name:         "empty mount targets",
+			mountTargets: []*cloud.MountTarget{},
+			preferredAZ:  "us-west-2a",
+			expectedIP:   "",
+		},
+		{
+			name: "preferred AZ found",
+			mountTargets: []*cloud.MountTarget{
+				{AZName: "us-west-2a", IPAddress: "10.0.1.1"},
+				{AZName: "us-west-2b", IPAddress: "10.0.2.1"},
+				{AZName: "us-west-2c", IPAddress: "10.0.3.1"},
+			},
+			preferredAZ: "us-west-2b",
+			expectedIP:  "10.0.2.1",
+		},
+		{
+			name: "preferred AZ not found falls back to random",
+			mountTargets: []*cloud.MountTarget{
+				{AZName: "us-west-2a", IPAddress: "10.0.1.1"},
+				{AZName: "us-west-2c", IPAddress: "10.0.3.1"},
+			},
+			preferredAZ: "us-west-2b",
+			expectedIP:  "10.0.1.1",
+		},
+		{
+			name: "single mount target matches",
+			mountTargets: []*cloud.MountTarget{
+				{AZName: "us-west-2a", IPAddress: "10.0.1.1"},
+			},
+			preferredAZ: "us-west-2a",
+			expectedIP:  "10.0.1.1",
+		},
+		{
+			name: "single mount target does not match",
+			mountTargets: []*cloud.MountTarget{
+				{AZName: "us-west-2a", IPAddress: "10.0.1.1"},
+			},
+			preferredAZ: "us-west-2c",
+			expectedIP:  "10.0.1.1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := selectMountTargetIP(tc.mountTargets, tc.preferredAZ)
+			if result != tc.expectedIP {
+				t.Errorf("selectMountTargetIP() = %q, want %q", result, tc.expectedIP)
+			}
+		})
+	}
+}
+
+func TestBuildMountTargetIPMap(t *testing.T) {
+	testFsId := "fs-abcd1234"
+	tests := []struct {
+		name         string
+		mountTargets []*cloud.MountTarget
+		describeErr  error
+		expectErr    bool
+		expectedMap  map[string]string
+	}{
+		{
+			name: "success: multiple mount targets",
+			mountTargets: []*cloud.MountTarget{
+				{AZName: "us-west-2a", IPAddress: "10.0.1.1"},
+				{AZName: "us-west-2b", IPAddress: "10.0.2.1"},
+			},
+			expectedMap: map[string]string{"us-west-2a": "10.0.1.1", "us-west-2b": "10.0.2.1"},
+		},
+		{
+			name: "success: single mount target",
+			mountTargets: []*cloud.MountTarget{
+				{AZName: "us-west-2a", IPAddress: "10.0.1.1"},
+			},
+			expectedMap: map[string]string{"us-west-2a": "10.0.1.1"},
+		},
+		{
+			name:        "failure: DescribeAvailableMountTargets returns error",
+			describeErr: fmt.Errorf("access denied"),
+			expectErr:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockCtl := gomock.NewController(t)
+			defer mockCtl.Finish()
+			mockCloud := mocks.NewMockCloud(mockCtl)
+			ctx := context.Background()
+
+			mockCloud.EXPECT().DescribeAvailableMountTargets(gomock.Eq(ctx), gomock.Eq(testFsId)).Return(tc.mountTargets, tc.describeErr)
+
+			result, err := buildMountTargetIPMap(ctx, mockCloud, testFsId)
+
+			if tc.expectErr {
+				if err == nil {
+					t.Fatal("Expected error but got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+
+			// Parse the JSON result and compare
+			var gotMap map[string]string
+			if err := json.Unmarshal([]byte(result), &gotMap); err != nil {
+				t.Fatalf("Failed to parse result JSON: %v", err)
+			}
+			if !reflect.DeepEqual(gotMap, tc.expectedMap) {
+				t.Errorf("buildMountTargetIPMap() = %v, want %v", gotMap, tc.expectedMap)
+			}
+		})
+	}
+}
+
+func TestGetCloudCrossAccountDefaults(t *testing.T) {
+	tests := []struct {
+		name                  string
+		secrets               map[string]string
+		expectCrossAccountDNS bool
+		expectErr             bool
+	}{
+		{
+			name:                  "crossaccount not set defaults to false",
+			secrets:               map[string]string{},
+			expectCrossAccountDNS: false,
+		},
+		{
+			name:                  "crossaccount explicitly true",
+			secrets:               map[string]string{"crossaccount": "true"},
+			expectCrossAccountDNS: true,
+		},
+		{
+			name:                  "crossaccount explicitly false",
+			secrets:               map[string]string{"crossaccount": "false"},
+			expectCrossAccountDNS: false,
+		},
+		{
+			name:      "crossaccount invalid value",
+			secrets:   map[string]string{"crossaccount": "notabool"},
+			expectErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockCtl := gomock.NewController(t)
+			defer mockCtl.Finish()
+			mockCloud := mocks.NewMockCloud(mockCtl)
+
+			driver := &Driver{
+				endpoint: "endpoint",
+				cloud:    mockCloud,
+			}
+
+			// getCloud will fail on NewCloudWithRole for roleArn cases,
+			// so we only test non-roleArn scenarios here.
+			_, _, crossAccountDNS, err := getCloud(tc.secrets, driver)
+
+			if tc.expectErr {
+				if err == nil {
+					t.Fatal("Expected error but got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+			if crossAccountDNS != tc.expectCrossAccountDNS {
+				t.Errorf("crossAccountDNSEnabled = %v, want %v", crossAccountDNS, tc.expectCrossAccountDNS)
+			}
+		})
+	}
 }

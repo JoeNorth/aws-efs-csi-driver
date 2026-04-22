@@ -100,6 +100,13 @@ func (c *FakeCloudProvider) DescribeMountTargets(ctx context.Context, fileSystem
 	return nil, ErrNotFound
 }
 
+func (c *FakeCloudProvider) DescribeAvailableMountTargets(ctx context.Context, fileSystemId string) ([]*MountTarget, error) {
+	if mt, ok := c.mountTargets[fileSystemId]; ok {
+		return []*MountTarget{mt}, nil
+	}
+	return nil, ErrNotFound
+}
+
 func (c *FakeCloudProvider) FindAccessPointByClientToken(ctx context.Context, clientToken, fileSystemId string, fsType util.FileSystemType) (accessPoint *AccessPoint, err error) {
 	if ap, exists := c.accessPoints[clientToken]; exists {
 		return ap, nil
