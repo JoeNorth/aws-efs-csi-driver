@@ -19,6 +19,7 @@ package driver
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -56,6 +57,7 @@ const (
 	GidMin                 = "gidRangeStart"
 	GidMax                 = "gidRangeEnd"
 	MountTargetIp          = "mounttargetip"
+	MountTargetIpMap       = "mounttargetipmap"
 	ProvisioningMode       = "provisioningMode"
 	PvName                 = "csi.storage.k8s.io/pv/name"
 	PvcName                = "csi.storage.k8s.io/pvc/name"
@@ -305,11 +307,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 			accessPointsOptions.DirectoryPerms = value
 		}
 
-		// Storage class parameter `az` will be used to fetch preferred mount target for cross account mount.
-		// If the `az` storage class parameter is not provided, a random mount target will be picked for mounting.
-		// This storage class parameter different from `az` mount option provided by efs-utils https://github.com/aws/efs-utils/blob/v1.31.1/src/mount_efs/__init__.py#L195
-		// The `az` mount option provided by efs-utils is used for cross az mount or to provide az of efs one zone file system mount within the same aws-account.
-		// To make use of the `az` mount option, add it under storage class's `mountOptions` section. https://kubernetes.io/docs/concepts/storage/storage-classes/#mount-options
+		// Storage class parameter `az` selects a specific AZ's mount target for cross-account mount
 		if value, ok := volumeParams[AzName]; ok {
 			if fsType != util.FileSystemTypeEFS {
 				return nil, status.Errorf(codes.InvalidArgument, "Parameter %v is only supported for EFS file systems, not supported for %v file systems", AzName, fsType)
@@ -429,14 +427,23 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 				// the same AZ-ID as the client instance); mounttargetip should
 				// not be used as a mount option in this case.
 				volContext[CrossAccount] = strconv.FormatBool(true)
-			} else {
+			} else if azName != "" {
+				// Use the specified AZ's mount target.
 				mountTarget, err := localCloud.DescribeMountTargets(ctx, accessPointsOptions.FileSystemId, azName, fsType)
 				if err != nil {
-					klog.Warningf("Failed to describe mount targets for file system %v. Skip using `mounttargetip` mount option: %v", accessPointsOptions.FileSystemId, err)
-				} else {
-					volContext[MountTargetIp] = mountTarget.IPAddress
+					return nil, status.Errorf(codes.Internal, "Failed to describe mount targets for file system %v in AZ %v: %v", accessPointsOptions.FileSystemId, azName, err)
 				}
+				volContext[MountTargetIp] = mountTarget.IPAddress
+			} else {
+				// No az specified and crossaccount DNS disabled: fetch all mount targets
+				// and pass the AZ→IP map so each node can pick its own AZ's mount target.
+				ipMapJSON, err := buildMountTargetIPMap(ctx, localCloud, accessPointsOptions.FileSystemId)
+				if err != nil {
+					return nil, status.Errorf(codes.Internal, "Failed to build mount target IP map for file system %v: %v", accessPointsOptions.FileSystemId, err)
+				}
+				volContext[MountTargetIpMap] = ipMapJSON
 			}
+
 		}
 	}
 
@@ -562,11 +569,12 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 					// Connect via dns rather than mounttargetip
 					mountOptions = append(mountOptions, CrossAccount)
 				} else {
-					mountTarget, err := localCloud.DescribeMountTargets(ctx, fileSystemId, "", fsType)
-					if err == nil {
-						mountOptions = append(mountOptions, MountTargetIp+"="+mountTarget.IPAddress)
-					} else {
-						klog.Warningf("Failed to describe mount targets for file system %v. Skip using `mounttargetip` mount option: %v", fileSystemId, err)
+					// Resolve mount target IP for cross-account cleanup mount.
+					mountTargets, err := localCloud.DescribeAvailableMountTargets(ctx, fileSystemId)
+					if err != nil {
+						klog.Warningf("DeleteVolume: failed to describe mount targets for %v: %v", fileSystemId, err)
+					} else if ip := selectMountTargetIP(mountTargets, d.cloud.GetMetadata().GetAvailabilityZone()); ip != "" {
+						mountOptions = append(mountOptions, MountTargetIp+"="+ip)
 					}
 				}
 			}
@@ -766,6 +774,38 @@ func createListOfVariableSubstitutions(volumeParams map[string]string) []string 
 		i += 2
 	}
 	return variableSubstitutions
+}
+
+// buildMountTargetIPMap fetches all available mount targets and returns a JSON-encoded AZ→IP map.
+func buildMountTargetIPMap(ctx context.Context, c cloud.Cloud, fileSystemId string) (string, error) {
+	mountTargets, err := c.DescribeAvailableMountTargets(ctx, fileSystemId)
+	if err != nil {
+		return "", err
+	}
+	ipMap := make(map[string]string, len(mountTargets))
+	for _, mt := range mountTargets {
+		ipMap[mt.AZName] = mt.IPAddress
+	}
+	jsonBytes, err := json.Marshal(ipMap)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal mount target IP map: %v", err)
+	}
+	return string(jsonBytes), nil
+}
+
+// selectMountTargetIP picks the mount target IP for the given preferredAZ.
+// If no mount target exists in the preferred AZ, it falls back to any available mount target.
+func selectMountTargetIP(mountTargets []*cloud.MountTarget, preferredAZ string) string {
+	if len(mountTargets) == 0 {
+		return ""
+	}
+	for _, mt := range mountTargets {
+		if mt.AZName == preferredAZ {
+			return mt.IPAddress
+		}
+	}
+	// Fall back to first available mount target
+	return mountTargets[0].IPAddress
 }
 
 func getSupportedComponentNames() []string {

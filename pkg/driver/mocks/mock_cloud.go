@@ -338,6 +338,21 @@ func (mr *MockCloudMockRecorder) DescribeMountTargets(ctx, fileSystemId, az, fsT
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DescribeMountTargets", reflect.TypeOf((*MockCloud)(nil).DescribeMountTargets), ctx, fileSystemId, az, fsType)
 }
 
+// DescribeAvailableMountTargets mocks base method.
+func (m *MockCloud) DescribeAvailableMountTargets(ctx context.Context, fileSystemId string) ([]*cloud.MountTarget, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DescribeAvailableMountTargets", ctx, fileSystemId)
+	ret0, _ := ret[0].([]*cloud.MountTarget)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// DescribeAvailableMountTargets indicates an expected call of DescribeAvailableMountTargets.
+func (mr *MockCloudMockRecorder) DescribeAvailableMountTargets(ctx, fileSystemId interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DescribeAvailableMountTargets", reflect.TypeOf((*MockCloud)(nil).DescribeAvailableMountTargets), ctx, fileSystemId)
+}
+
 // FindAccessPointByClientToken mocks base method.
 func (m *MockCloud) FindAccessPointByClientToken(ctx context.Context, clientToken, fileSystemId string, fsType util.FileSystemType) (*cloud.AccessPoint, error) {
 	m.ctrl.T.Helper()

@@ -123,6 +123,7 @@ type Cloud interface {
 	ListAccessPoints(ctx context.Context, fileSystemId string, fsType util.FileSystemType) (accessPoints []*AccessPoint, err error)
 	DescribeFileSystem(ctx context.Context, fileSystemId string, fsType util.FileSystemType) (fs *FileSystem, err error)
 	DescribeMountTargets(ctx context.Context, fileSystemId, az string, fsType util.FileSystemType) (fs *MountTarget, err error)
+	DescribeAvailableMountTargets(ctx context.Context, fileSystemId string) ([]*MountTarget, error)
 }
 
 type cloud struct {
@@ -688,6 +689,38 @@ func (c *cloud) DescribeMountTargets(ctx context.Context, fileSystemId, azName s
 	default:
 		return nil, fmt.Errorf("Unsupported fsType: %v", err)
 	}
+}
+
+// DescribeAvailableMountTargets returns all available mount targets for an EFS file system.
+func (c *cloud) DescribeAvailableMountTargets(ctx context.Context, fileSystemId string) ([]*MountTarget, error) {
+	res, err := c.efs.DescribeMountTargets(ctx, &efs.DescribeMountTargetsInput{FileSystemId: &fileSystemId}, func(o *efs.Options) {
+		o.Retryer = c.rm.describeMountTargetsRetryer
+	})
+	if err != nil {
+		if isAccessDenied(err) {
+			return nil, ErrAccessDenied
+		}
+		if isFileSystemNotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("Describe Mount Targets failed: %v", err)
+	}
+
+	available := getAvailableMountTargets(res.MountTargets)
+	if len(available) == 0 {
+		return nil, fmt.Errorf("No available mount targets for file system %v", fileSystemId)
+	}
+
+	var result []*MountTarget
+	for _, mt := range available {
+		result = append(result, &MountTarget{
+			AZName:        *mt.AvailabilityZoneName,
+			AZId:          *mt.AvailabilityZoneId,
+			MountTargetId: *mt.MountTargetId,
+			IPAddress:     *mt.IpAddress,
+		})
+	}
+	return result, nil
 }
 
 func isFileSystemNotFound(err error) bool {
