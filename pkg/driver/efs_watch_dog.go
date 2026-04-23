@@ -153,7 +153,7 @@ stunnel_health_check_command_timeout_sec = 30
 source={{.EfsClientSource}}
 
 [cloudwatch-log]
-# enabled = true
+enabled = {{.CloudWatchLogEnabled}}
 log_group_name = /aws/efs/utils
 
 # Possible values are : 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, and 3653
@@ -290,7 +290,7 @@ metrics_enabled = true
 source={{.EfsClientSource}}
 
 [cloudwatch-log]
-enabled = true
+enabled = {{.CloudWatchLogEnabled}}
 log_group_name = /aws/efs/utils
 
 # Possible values are : 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, and 3653
@@ -323,6 +323,10 @@ type execWatchdog struct {
 	efsUtilsStaticFilesPath string
 	// enable debug logging in efs-utils.conf and s3files-utils.conf
 	debugLogs bool
+	// enable CloudWatch logging for EFS
+	efsCloudWatchLogEnabled bool
+	// enable CloudWatch logging for S3Files
+	s3filesCloudWatchLogEnabled bool
 	// stopCh indicates if it should be stopped
 	stopCh chan struct{}
 
@@ -330,21 +334,24 @@ type execWatchdog struct {
 }
 
 type utilsConfig struct {
-	EfsClientSource     string
-	Region              string
-	FipsEnabled         string
-	PortRangeUpperBound string
-	DebugLogs           bool
+	EfsClientSource      string
+	Region               string
+	FipsEnabled          string
+	PortRangeUpperBound  string
+	DebugLogs            bool
+	CloudWatchLogEnabled bool
 }
 
-func newExecWatchdog(efsUtilsCfgPath, efsUtilsStaticFilesPath string, debugLogs bool, cmd string, arg ...string) Watchdog {
+func newExecWatchdog(efsUtilsCfgPath, efsUtilsStaticFilesPath string, debugLogs, efsCloudWatchLogEnabled, s3filesCloudWatchLogEnabled bool, cmd string, arg ...string) Watchdog {
 	return &execWatchdog{
-		efsUtilsCfgPath:         efsUtilsCfgPath,
-		efsUtilsStaticFilesPath: efsUtilsStaticFilesPath,
-		debugLogs:               debugLogs,
-		execCmd:                 cmd,
-		execArg:                 arg,
-		stopCh:                  make(chan struct{}),
+		efsUtilsCfgPath:             efsUtilsCfgPath,
+		efsUtilsStaticFilesPath:     efsUtilsStaticFilesPath,
+		debugLogs:                   debugLogs,
+		efsCloudWatchLogEnabled:     efsCloudWatchLogEnabled,
+		s3filesCloudWatchLogEnabled: s3filesCloudWatchLogEnabled,
+		execCmd:                     cmd,
+		execArg:                     arg,
+		stopCh:                      make(chan struct{}),
 	}
 }
 
@@ -440,12 +447,24 @@ func (w *execWatchdog) updateConfig(efsClientSource string) error {
 	if err != nil || val < 21049 {
 		portRangeUpperBound = "21049"
 	}
-	cfg := utilsConfig{EfsClientSource: efsClientSource, Region: region, FipsEnabled: fipsEnabled, PortRangeUpperBound: portRangeUpperBound, DebugLogs: w.debugLogs}
+	cfg := utilsConfig{
+		EfsClientSource:      efsClientSource,
+		Region:               region,
+		FipsEnabled:          fipsEnabled,
+		PortRangeUpperBound:  portRangeUpperBound,
+		DebugLogs:            w.debugLogs,
+		CloudWatchLogEnabled: false,
+	}
 
-	if err := w.writeConfigFile(efsUtilsConfigFileName, efsUtilsConfigTemplate, cfg); err != nil {
+	efsCfg := cfg
+	efsCfg.CloudWatchLogEnabled = w.efsCloudWatchLogEnabled
+	if err := w.writeConfigFile(efsUtilsConfigFileName, efsUtilsConfigTemplate, efsCfg); err != nil {
 		return err
 	}
-	if err := w.writeConfigFile(s3filesUtilsConfigFileName, s3filesUtilsConfigTemplate, cfg); err != nil {
+
+	s3filesCfg := cfg
+	s3filesCfg.CloudWatchLogEnabled = w.s3filesCloudWatchLogEnabled
+	if err := w.writeConfigFile(s3filesUtilsConfigFileName, s3filesUtilsConfigTemplate, s3filesCfg); err != nil {
 		return err
 	}
 	return nil

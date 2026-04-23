@@ -75,6 +75,12 @@ func TestParseFlagsWithDefaultValue(t *testing.T) {
 	if *opts.UnmountTimeout != DefaultUnmountTimeout {
 		t.Errorf("Expected unmount-timeout %d, got %d", DefaultUnmountTimeout, *opts.UnmountTimeout)
 	}
+	if *opts.EfsCloudWatchLogEnabled != false {
+		t.Errorf("Expected efs-cloudwatch-log-enabled false, got %v", *opts.EfsCloudWatchLogEnabled)
+	}
+	if *opts.S3FilesCloudWatchLogEnabled != true {
+		t.Errorf("Expected s3files-cloudwatch-log-enabled true, got %v", *opts.S3FilesCloudWatchLogEnabled)
+	}
 }
 
 func TestParseFlagsWithCustomValues(t *testing.T) {
@@ -102,6 +108,8 @@ func TestParseFlagsWithCustomValues(t *testing.T) {
 		"--volume-attach-limit=15",
 		"--force-unmount-after-timeout=true",
 		"--unmount-timeout=60s",
+		"--efs-cloudwatch-log-enabled=true",
+		"--s3files-cloudwatch-log-enabled=false",
 	}
 
 	opts := NewOptions()
@@ -162,6 +170,12 @@ func TestParseFlagsWithCustomValues(t *testing.T) {
 
 	if *opts.UnmountTimeout != 60*time.Second {
 		t.Errorf("Expected unmount-timeout 60 seconds, got %v", *opts.UnmountTimeout)
+	}
+	if *opts.EfsCloudWatchLogEnabled != true {
+		t.Errorf("Expected efs-cloudwatch-log-enabled true, got %v", *opts.EfsCloudWatchLogEnabled)
+	}
+	if *opts.S3FilesCloudWatchLogEnabled != false {
+		t.Errorf("Expected s3files-cloudwatch-log-enabled false, got %v", *opts.S3FilesCloudWatchLogEnabled)
 	}
 }
 
