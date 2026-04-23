@@ -72,7 +72,7 @@ stunnel_check_cert_validity = false
 {{if .FipsEnabled -}}
 fips_mode_enabled = {{.FipsEnabled -}}
 {{else -}}
-#fips_mode_enabled = false
+fips_mode_enabled = false
 {{- end}}
 
 # Define the port range that the TLS tunnel will choose from
@@ -88,6 +88,14 @@ fall_back_to_mount_target_ip_address_enabled = true
 # By default, we use IMDSv2 to get the instance metadata, set this to true if you want to disable IMDSv2 usage
 disable_fetch_ec2_metadata_token = false
 
+# By default, we enable efs-utils to retry failed mount.nfs command that due to (1) connection reset by peer (2) the
+# mount.nfs is not finished within 'retry_nfs_mount_command_timeout_sec'. If the retry count is set as N, initial N - 1
+# mount attempts will timeout if the command does not finish within 'retry_nfs_mount_command_timeout_sec' sec.
+# The last mount attempt will keep the existing behavior of mount.nfs.
+#
+retry_nfs_mount_command = true
+retry_nfs_mount_command_count = 3
+retry_nfs_mount_command_timeout_sec = 15
 
 [mount.cn-north-1]
 dns_name_suffix = amazonaws.com.cn
@@ -95,19 +103,27 @@ dns_name_suffix = amazonaws.com.cn
 [mount.cn-northwest-1]
 dns_name_suffix = amazonaws.com.cn
 
-[mount.us-iso-west-1]
-dns_name_suffix = c2s.ic.gov
+[mount.eu-isoe-west-1]
+dns_name_suffix = cloud.adc-e.uk
+stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+[mount.eusc-de-east-1]
+dns_name_suffix = amazonaws.eu
 stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 [mount.us-iso-east-1]
 dns_name_suffix = c2s.ic.gov
 stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
-[mount.us-isob-west-1]
-dns_name_suffix = sc2s.sgov.gov
+[mount.us-iso-west-1]
+dns_name_suffix = c2s.ic.gov
 stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 [mount.us-isob-east-1]
+dns_name_suffix = sc2s.sgov.gov
+stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+[mount.us-isob-west-1]
 dns_name_suffix = sc2s.sgov.gov
 stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
@@ -117,14 +133,6 @@ stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 [mount.us-isof-south-1]
 dns_name_suffix = csp.hci.ic.gov
-stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
-
-[mount.eu-isoe-west-1]
-dns_name_suffix = cloud.adc-e.uk
-stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
-
-[mount.eusc-de-east-1]
-dns_name_suffix = amazonaws.eu
 stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 [mount-watchdog]
@@ -140,8 +148,6 @@ tls_cert_renewal_interval_min = 60
 stunnel_health_check_enabled = true
 stunnel_health_check_interval_min = 5
 stunnel_health_check_command_timeout_sec = 30
-
-enable_version_check = false
 
 [client-info] 
 source={{.EfsClientSource}}
@@ -179,7 +185,6 @@ region = {{.Region -}}
 {{else -}}
 #region = us-east-1
 {{- end}}
-stunnel_debug_enabled = {{.DebugLogs}}
 #Uncomment the below option to save all stunnel logs for a file system to the same file
 #stunnel_logs_file = /var/log/amazon/efs/{fs_id}.stunnel.log
 stunnel_cafile = /etc/amazon/efs/efs-utils.crt
@@ -219,18 +224,11 @@ retry_nfs_mount_command = true
 retry_nfs_mount_command_count = 3
 retry_nfs_mount_command_timeout_sec = 15
 
-
-[mount.ap-isog-east-1]
-dns_name_suffix = cloud.adc-g.au
-stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
-
 [mount.cn-north-1]
 dns_name_suffix = amazonaws.com.cn
 
-
 [mount.cn-northwest-1]
 dns_name_suffix = amazonaws.com.cn
-
 
 [mount.eu-isoe-west-1]
 dns_name_suffix = cloud.adc-e.uk
@@ -238,7 +236,7 @@ stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 [mount.eusc-de-east-1]
 dns_name_suffix = amazonaws.eu
-
+stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 [mount.us-iso-east-1]
 dns_name_suffix = c2s.ic.gov

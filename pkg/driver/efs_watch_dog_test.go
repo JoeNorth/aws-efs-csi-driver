@@ -55,7 +55,7 @@ stunnel_check_cert_hostname = true
 stunnel_check_cert_validity = false
 
 # Enable FIPS mode. stunnel complains if FIPS is available and enabled system-wide, but not set here.
-#fips_mode_enabled = false
+fips_mode_enabled = false
 
 # Define the port range that the TLS tunnel will choose from
 port_range_lower_bound = 20049
@@ -70,6 +70,14 @@ fall_back_to_mount_target_ip_address_enabled = true
 # By default, we use IMDSv2 to get the instance metadata, set this to true if you want to disable IMDSv2 usage
 disable_fetch_ec2_metadata_token = false
 
+# By default, we enable efs-utils to retry failed mount.nfs command that due to (1) connection reset by peer (2) the
+# mount.nfs is not finished within 'retry_nfs_mount_command_timeout_sec'. If the retry count is set as N, initial N - 1
+# mount attempts will timeout if the command does not finish within 'retry_nfs_mount_command_timeout_sec' sec.
+# The last mount attempt will keep the existing behavior of mount.nfs.
+#
+retry_nfs_mount_command = true
+retry_nfs_mount_command_count = 3
+retry_nfs_mount_command_timeout_sec = 15
 
 [mount.cn-north-1]
 dns_name_suffix = amazonaws.com.cn
@@ -77,19 +85,27 @@ dns_name_suffix = amazonaws.com.cn
 [mount.cn-northwest-1]
 dns_name_suffix = amazonaws.com.cn
 
-[mount.us-iso-west-1]
-dns_name_suffix = c2s.ic.gov
+[mount.eu-isoe-west-1]
+dns_name_suffix = cloud.adc-e.uk
+stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+[mount.eusc-de-east-1]
+dns_name_suffix = amazonaws.eu
 stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 [mount.us-iso-east-1]
 dns_name_suffix = c2s.ic.gov
 stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
-[mount.us-isob-west-1]
-dns_name_suffix = sc2s.sgov.gov
+[mount.us-iso-west-1]
+dns_name_suffix = c2s.ic.gov
 stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 [mount.us-isob-east-1]
+dns_name_suffix = sc2s.sgov.gov
+stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+[mount.us-isob-west-1]
 dns_name_suffix = sc2s.sgov.gov
 stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
@@ -99,14 +115,6 @@ stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 [mount.us-isof-south-1]
 dns_name_suffix = csp.hci.ic.gov
-stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
-
-[mount.eu-isoe-west-1]
-dns_name_suffix = cloud.adc-e.uk
-stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
-
-[mount.eusc-de-east-1]
-dns_name_suffix = amazonaws.eu
 stunnel_cafile = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 [mount-watchdog]
@@ -122,8 +130,6 @@ tls_cert_renewal_interval_min = 60
 stunnel_health_check_enabled = true
 stunnel_health_check_interval_min = 5
 stunnel_health_check_command_timeout_sec = 30
-
-enable_version_check = false
 
 [client-info] 
 source=k8s
