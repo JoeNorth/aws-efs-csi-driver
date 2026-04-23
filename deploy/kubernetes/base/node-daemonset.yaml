@@ -64,6 +64,8 @@ spec:
             - --force-unmount-after-timeout=false
             - --unmount-timeout=30s
             - --debug-logs=false
+            - --efs-cloudwatch-log-enabled=false
+            - --s3files-cloudwatch-log-enabled=true
           env:
             - name: CSI_ENDPOINT
               value: unix:/csi/csi.sock
