@@ -72,7 +72,9 @@ func init() {
 	flag.StringVar(&combinedMountTargetSubnetIds, "mount-target-subnet-ids", "", "comma-separated list of subnet IDs to use for mount targets of provisioned EFS file system, only used if -file-system-id is not set")
 	flag.StringVar(&EfsDriverNamespace, "efs-driver-namespace", "kube-system", "namespace of EFS driver pods")
 	flag.StringVar(&combinedEfsDriverLabelSelectors, "efs-driver-label-selectors", "app=efs-csi-node", "comma-separated label selectors for EFS driver pods, follows the form key1=value1,key2=value2")
-
+	flag.StringVar(&CrossAccountSecretName, "cross-account-secret-name", "", "name of a pre-existing K8s secret in kube-system with awsRoleArn for cross-account EFS access")
+	flag.StringVar(&CrossAccountAZ, "cross-account-az", "", "availability zone for cross-account mount target selection (used with crossaccount=false)")
+	flag.StringVar(&CrossAccountMountTargetIP, "cross-account-mount-target-ip", "", "mount target IP for static PV tests; used when testing cross-account static provisioning")
 	flag.Parse()
 
 	var err error
