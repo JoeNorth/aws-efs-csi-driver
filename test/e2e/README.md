@@ -28,6 +28,10 @@ go test -v -timeout 0 ./... -report-dir=$ARTIFACTS -ginkgo.focus="\[efs-csi\]" -
 The E2E flags that you can pass to `go test` are defined in [e2e_test.go](https://github.com/kubernetes-sigs/aws-efs-csi-driver/blob/master/test/e2e/e2e_test.go#L66-L75).
 
 
+### Running Cross-Account E2E Tests
+Cross-account tests verify EFS behaviors when the filesystem is in a different AWS account than the EKS cluster. The same standard e2e test suite runs against a cluster pre-configured with cross-account Secret and StorageClass.
+
+
 ### Running Upgrade Test
 In order to test upgrades from previous releases to the current development version of the driver, the following steps can be followed:
 

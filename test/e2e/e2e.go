@@ -45,6 +45,16 @@ var (
 	S3FilesFileSystemName string
 	s3FilesResources      *S3FilesResources // Store complete S3Files resources for cleanup
 
+	// Cross-account parameters — when set, StorageClasses include the provisioner
+	// secret reference and iam mount option for cross-account EFS access.
+	// CrossAccountMountTargetIP is the mount target IP for static PV tests —
+	// static provisioning bypasses the controller, and AZ-specific EFS DNS isn't
+	// resolvable cross-VPC unless extra Route 53 setup is done; the customer
+	// pattern in the AWS docs is to pass mounttargetip directly.
+	CrossAccountSecretName    string
+	CrossAccountAZ            string
+	CrossAccountMountTargetIP string
+
 	// CreateFileSystem if set true will create a file system before tests.
 	// Alternatively, provide an existing file system via FileSystemId. If this
 	// is true, ClusterName and Region must be set. For CI it should be true
@@ -158,6 +168,8 @@ func (e *efsDriver) GetDynamicProvisionStorageClass(ctx context.Context, config 
 		"directoryPerms":   "777",
 	}
 
+	mountOptions := applyCrossAccountConfig(parameters)
+
 	generateName := fmt.Sprintf("efs-csi-dynamic-sc-test1234-")
 
 	defaultBindingMode := storagev1.VolumeBindingImmediate
@@ -167,6 +179,7 @@ func (e *efsDriver) GetDynamicProvisionStorageClass(ctx context.Context, config 
 		},
 		Provisioner:       "efs.csi.aws.com",
 		Parameters:        parameters,
+		MountOptions:      mountOptions,
 		VolumeBindingMode: &defaultBindingMode,
 	}
 }
@@ -635,8 +648,23 @@ func makeEFSPVCDynamicProvisioning(namespace, name string, storageClassName stri
 	}
 }
 
+// applyCrossAccountConfig adds cross-account secret reference, mount options,
+// and az parameter to StorageClass parameters when cross-account testing is enabled.
+func applyCrossAccountConfig(parameters map[string]string) []string {
+	if CrossAccountSecretName == "" {
+		return nil
+	}
+	parameters["csi.storage.k8s.io/provisioner-secret-name"] = CrossAccountSecretName
+	parameters["csi.storage.k8s.io/provisioner-secret-namespace"] = "kube-system"
+	if CrossAccountAZ != "" {
+		parameters["az"] = CrossAccountAZ
+	}
+	return []string{"tls", "iam"}
+}
+
 func GetStorageClass(params map[string]string) *storagev1.StorageClass {
 	parameters := params
+	mountOptions := applyCrossAccountConfig(parameters)
 
 	generateName := fmt.Sprintf("efs-csi-dynamic-sc-test1234-")
 
@@ -647,6 +675,7 @@ func GetStorageClass(params map[string]string) *storagev1.StorageClass {
 		},
 		Provisioner:       "efs.csi.aws.com",
 		Parameters:        parameters,
+		MountOptions:      mountOptions,
 		VolumeBindingMode: &defaultBindingMode,
 	}
 }
@@ -699,6 +728,17 @@ func makeEFSPV(name, path string, volumeAttributes map[string]string, config Fil
 	if path != "" {
 		volumeHandle += ":" + path
 	}
+
+	// Cross-account static PV tests: inject the mount target IP directly via
+	// the mounttargetip mount option. Static provisioning bypasses the CSI
+	// controller, and EFS DNS isn't resolvable cross-VPC without additional
+	// Route 53 setup
+	var mountOptions []string
+	if CrossAccountSecretName != "" && CrossAccountMountTargetIP != "" {
+		mountOptions = []string{"tls", "iam"}
+		volumeAttributes["mounttargetip"] = CrossAccountMountTargetIP
+	}
+
 	return &v1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -715,7 +755,8 @@ func makeEFSPV(name, path string, volumeAttributes map[string]string, config Fil
 					VolumeAttributes: volumeAttributes,
 				},
 			},
-			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteMany},
+			MountOptions: mountOptions,
+			AccessModes:  []v1.PersistentVolumeAccessMode{v1.ReadWriteMany},
 		},
 	}
 }
