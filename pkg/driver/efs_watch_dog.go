@@ -271,7 +271,7 @@ proxy_logging_max_bytes = 1048576
 proxy_logging_file_count = 10
 
 # CloudWatch metric emission from proxy, set to false to disable / opt-out
-metrics_enabled = true
+metrics_enabled = {{.CloudWatchMetricsEnabled}}
 
 # Readbypass parameters, Uncomment the below options if you want override default value
 # read_bypass_denylist_size = 10000
@@ -327,6 +327,8 @@ type execWatchdog struct {
 	efsCloudWatchLogEnabled bool
 	// enable CloudWatch logging for S3Files
 	s3filesCloudWatchLogEnabled bool
+	// enable CloudWatch metrics for S3Files proxy
+	s3filesCloudWatchMetricsEnabled bool
 	// stopCh indicates if it should be stopped
 	stopCh chan struct{}
 
@@ -334,24 +336,26 @@ type execWatchdog struct {
 }
 
 type utilsConfig struct {
-	EfsClientSource      string
-	Region               string
-	FipsEnabled          string
-	PortRangeUpperBound  string
-	DebugLogs            bool
-	CloudWatchLogEnabled bool
+	EfsClientSource          string
+	Region                   string
+	FipsEnabled              string
+	PortRangeUpperBound      string
+	DebugLogs                bool
+	CloudWatchLogEnabled     bool
+	CloudWatchMetricsEnabled bool
 }
 
-func newExecWatchdog(efsUtilsCfgPath, efsUtilsStaticFilesPath string, debugLogs, efsCloudWatchLogEnabled, s3filesCloudWatchLogEnabled bool, cmd string, arg ...string) Watchdog {
+func newExecWatchdog(efsUtilsCfgPath, efsUtilsStaticFilesPath string, debugLogs, efsCloudWatchLogEnabled, s3filesCloudWatchLogEnabled, s3filesCloudWatchMetricsEnabled bool, cmd string, arg ...string) Watchdog {
 	return &execWatchdog{
-		efsUtilsCfgPath:             efsUtilsCfgPath,
-		efsUtilsStaticFilesPath:     efsUtilsStaticFilesPath,
-		debugLogs:                   debugLogs,
-		efsCloudWatchLogEnabled:     efsCloudWatchLogEnabled,
-		s3filesCloudWatchLogEnabled: s3filesCloudWatchLogEnabled,
-		execCmd:                     cmd,
-		execArg:                     arg,
-		stopCh:                      make(chan struct{}),
+		efsUtilsCfgPath:                 efsUtilsCfgPath,
+		efsUtilsStaticFilesPath:         efsUtilsStaticFilesPath,
+		debugLogs:                       debugLogs,
+		efsCloudWatchLogEnabled:         efsCloudWatchLogEnabled,
+		s3filesCloudWatchLogEnabled:     s3filesCloudWatchLogEnabled,
+		s3filesCloudWatchMetricsEnabled: s3filesCloudWatchMetricsEnabled,
+		execCmd:                         cmd,
+		execArg:                         arg,
+		stopCh:                          make(chan struct{}),
 	}
 }
 
@@ -464,6 +468,7 @@ func (w *execWatchdog) updateConfig(efsClientSource string) error {
 
 	s3filesCfg := cfg
 	s3filesCfg.CloudWatchLogEnabled = w.s3filesCloudWatchLogEnabled
+	s3filesCfg.CloudWatchMetricsEnabled = w.s3filesCloudWatchMetricsEnabled
 	if err := w.writeConfigFile(s3filesUtilsConfigFileName, s3filesUtilsConfigTemplate, s3filesCfg); err != nil {
 		return err
 	}

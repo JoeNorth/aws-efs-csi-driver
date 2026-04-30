@@ -81,6 +81,9 @@ func TestParseFlagsWithDefaultValue(t *testing.T) {
 	if *opts.S3FilesCloudWatchLogEnabled != true {
 		t.Errorf("Expected s3files-cloudwatch-log-enabled true, got %v", *opts.S3FilesCloudWatchLogEnabled)
 	}
+	if *opts.S3FilesCloudWatchMetricsEnabled != true {
+		t.Errorf("Expected s3files-cloudwatch-metrics-enabled true, got %v", *opts.S3FilesCloudWatchMetricsEnabled)
+	}
 }
 
 func TestParseFlagsWithCustomValues(t *testing.T) {
@@ -110,6 +113,7 @@ func TestParseFlagsWithCustomValues(t *testing.T) {
 		"--unmount-timeout=60s",
 		"--efs-cloudwatch-log-enabled=true",
 		"--s3files-cloudwatch-log-enabled=false",
+		"--s3files-cloudwatch-metrics-enabled=false",
 	}
 
 	opts := NewOptions()
@@ -176,6 +180,9 @@ func TestParseFlagsWithCustomValues(t *testing.T) {
 	}
 	if *opts.S3FilesCloudWatchLogEnabled != false {
 		t.Errorf("Expected s3files-cloudwatch-log-enabled false, got %v", *opts.S3FilesCloudWatchLogEnabled)
+	}
+	if *opts.S3FilesCloudWatchMetricsEnabled != false {
+		t.Errorf("Expected s3files-cloudwatch-metrics-enabled false, got %v", *opts.S3FilesCloudWatchMetricsEnabled)
 	}
 }
 

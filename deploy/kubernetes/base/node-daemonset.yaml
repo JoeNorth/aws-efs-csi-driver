@@ -66,6 +66,7 @@ spec:
             - --debug-logs=false
             - --efs-cloudwatch-log-enabled=false
             - --s3files-cloudwatch-log-enabled=true
+            - --s3files-cloudwatch-metrics-enabled=true
           env:
             - name: CSI_ENDPOINT
               value: unix:/csi/csi.sock
