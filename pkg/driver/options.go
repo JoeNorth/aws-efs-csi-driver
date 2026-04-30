@@ -55,7 +55,7 @@ func NewOptions() *Options {
 		VolumeAttachLimitOptIn:          flag.Bool("volume-attach-limit-opt-in", false, "Opt in to use volume attach limit."),
 		VolumeAttachLimit:               flag.Int64("volume-attach-limit", UnsetVolumeAttachLimit, "Maximum number of volumes that can be attached to a node. If volumeAttachLimitOptIn is true, it has to be set to a positive value."),
 		ForceUnmountAfterTimeout:        flag.Bool("force-unmount-after-timeout", false, "Enable force unmount if normal unmount times out during NodeUnpublishVolume."),
-		UnmountTimeout:                  flag.Duration("unmount-timeout", DefaultUnmountTimeout, "Timeout for unmounting a volume during NodePublishVolume when forceUnmountAfterTimeout is true. If the timeout is reached, the volume will be forcibly unmounted. The default value is 30 seconds."),
+		UnmountTimeout:                  flag.Duration("unmount-timeout", DefaultUnmountTimeout, "Timeout for unmounting a volume during NodeUnpublishVolume when forceUnmountAfterTimeout is true. If the timeout is reached, the volume will be forcibly unmounted. The default value is 30 seconds."),
 		DebugLogs:                       flag.Bool("debug-logs", false, "Set klog verbosity to level 5 and enable debug logging in efs-utils."),
 		EfsCloudWatchLogEnabled:         flag.Bool("efs-cloudwatch-log-enabled", false, "Enable CloudWatch logging for EFS in efs-utils.conf."),
 		S3FilesCloudWatchLogEnabled:     flag.Bool("s3files-cloudwatch-log-enabled", true, "Enable CloudWatch logging for S3Files in s3files-utils.conf."),
