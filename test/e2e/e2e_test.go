@@ -73,8 +73,9 @@ func init() {
 	flag.StringVar(&EfsDriverNamespace, "efs-driver-namespace", "kube-system", "namespace of EFS driver pods")
 	flag.StringVar(&combinedEfsDriverLabelSelectors, "efs-driver-label-selectors", "app=efs-csi-node", "comma-separated label selectors for EFS driver pods, follows the form key1=value1,key2=value2")
 	flag.StringVar(&CrossAccountSecretName, "cross-account-secret-name", "", "name of a pre-existing K8s secret in kube-system with awsRoleArn for cross-account EFS access")
-	flag.StringVar(&CrossAccountAZ, "cross-account-az", "", "availability zone for cross-account mount target selection (used with crossaccount=false)")
-	flag.StringVar(&CrossAccountMountTargetIP, "cross-account-mount-target-ip", "", "mount target IP for static PV tests; used when testing cross-account static provisioning")
+	flag.StringVar(&CrossAccountAZ, "cross-account-az", "", "availability zone for cross-account mount target selection")
+	flag.StringVar(&CrossAccountMountTargetIP, "cross-account-mount-target-ip", "", "mount target IP for static PV tests; used when testing cross-account static provisioning without crossaccount=true")
+	flag.StringVar(&CrossAccountSecretCrossaccountMode, "cross-account-secret-crossaccount-mode", "", "value of the crossaccount field in the pre-configured cross-account secret ('true' or unset). When 'true', static PV tests use crossaccount=true (requires Route 53 AZ-specific zones); otherwise, tests use mounttargetip")
 	flag.Parse()
 
 	var err error
@@ -84,6 +85,16 @@ func init() {
 	}
 	MountTargetSecurityGroupIds = parseCommaSeparatedStrings(combinedMountTargetSecurityGroupIds)
 	MountTargetSubnetIds = parseCommaSeparatedStrings(combinedMountTargetSubnetIds)
+
+	validateFlags()
+}
+
+func validateFlags() {
+	if CrossAccountSecretName != "" && CrossAccountSecretCrossaccountMode != "true" && CrossAccountMountTargetIP == "" {
+		log.Fatalln("--cross-account-mount-target-ip is required when --cross-account-secret-name is set and " +
+			"--cross-account-secret-crossaccount-mode is not 'true', because static provisioning requires " +
+			"mounttargetip when cross-account DNS is not enabled")
+	}
 }
 
 func TestEFSCSI(t *testing.T) {
