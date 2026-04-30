@@ -47,13 +47,21 @@ var (
 
 	// Cross-account parameters — when set, StorageClasses include the provisioner
 	// secret reference and iam mount option for cross-account EFS access.
-	// CrossAccountMountTargetIP is the mount target IP for static PV tests —
-	// static provisioning bypasses the controller, and AZ-specific EFS DNS isn't
-	// resolvable cross-VPC unless extra Route 53 setup is done; the customer
-	// pattern in the AWS docs is to pass mounttargetip directly.
-	CrossAccountSecretName    string
-	CrossAccountAZ            string
-	CrossAccountMountTargetIP string
+	// CrossAccountSecretCrossaccountMode indicates the crossaccount value in the
+	// pre-configured cross-account Secret. When set to "true", the test secret
+	// has crossaccount=true (efs-utils resolves AZ-specific DNS — requires
+	// Route 53 AZ-specific zones in the client VPC). When empty/unset, the
+	// secret omits the crossaccount field (defaults to false), and the
+	// controller injects mount target IP(s) into the PV volumeAttributes.
+	// This flag also controls static PV test behavior:
+	//   - "true": PV has crossaccount=true volumeAttribute (+ tls, iam mount opts)
+	//   - else:   PV has mounttargetip volumeAttribute (+ tls, iam mount opts)
+	// CrossAccountMountTargetIP is the mount target IP used for static PV tests
+	// when CrossAccountSecretCrossaccountMode != "true".
+	CrossAccountSecretName             string
+	CrossAccountAZ                     string
+	CrossAccountMountTargetIP          string
+	CrossAccountSecretCrossaccountMode string
 
 	// CreateFileSystem if set true will create a file system before tests.
 	// Alternatively, provide an existing file system via FileSystemId. If this
@@ -729,14 +737,19 @@ func makeEFSPV(name, path string, volumeAttributes map[string]string, config Fil
 		volumeHandle += ":" + path
 	}
 
-	// Cross-account static PV tests: inject the mount target IP directly via
-	// the mounttargetip mount option. Static provisioning bypasses the CSI
-	// controller, and EFS DNS isn't resolvable cross-VPC without additional
-	// Route 53 setup
+	// Cross-account static PV tests: static provisioning bypasses the CSI
+	// controller, so we must either (a) use the crossaccount mount option
+	// which relies on efs-utils resolving AZ-specific DNS (requires Route 53
+	// private hosted zones in the client VPC), or
+	// (b) inject the mount target IP directly via mounttargetip
 	var mountOptions []string
-	if CrossAccountSecretName != "" && CrossAccountMountTargetIP != "" {
+	if CrossAccountSecretName != "" {
 		mountOptions = []string{"tls", "iam"}
-		volumeAttributes["mounttargetip"] = CrossAccountMountTargetIP
+		if CrossAccountSecretCrossaccountMode == "true" {
+			volumeAttributes["crossaccount"] = "true"
+		} else if CrossAccountMountTargetIP != "" {
+			volumeAttributes["mounttargetip"] = CrossAccountMountTargetIP
+		}
 	}
 
 	return &v1.PersistentVolume{
