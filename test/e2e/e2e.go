@@ -18,9 +18,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	storageframework "k8s.io/kubernetes/test/e2e/storage/framework"
 	"k8s.io/kubernetes/test/e2e/storage/testsuites"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
@@ -492,6 +494,111 @@ var _ = ginkgo.Describe("[efs-csi]", func() {
 					}
 					if output != testData {
 						ginkgo.Fail("Read data does not match write data.")
+					}
+				})
+
+				ginkgo.It("should reuse access point when reuseAccessPoint is enabled", func() {
+					if config.FSType != util.FileSystemTypeEFS {
+						ginkgo.Skip("reuseAccessPoint is only supported for EFS filesystem type")
+					}
+					pvcName := "reuse-ap-test-" + generateRandomString(4)
+					testData := "REUSE AP TEST"
+					writePath := "/mnt/volume1/out"
+
+					ginkgo.By("Creating StorageClass with reuseAccessPoint enabled and Retain reclaim policy")
+					params := map[string]string{
+						"provisioningMode": config.ProvisioningMode,
+						"fileSystemId":     config.GetFSID(),
+						"directoryPerms":   "700",
+						"basePath":         "/reuse_ap_test",
+						"reuseAccessPoint": "true",
+					}
+					sc := GetStorageClass(params)
+					retainPolicy := v1.PersistentVolumeReclaimRetain
+					sc.ReclaimPolicy = &retainPolicy
+					sc, err := f.ClientSet.StorageV1().StorageClasses().Create(context.TODO(), sc, metav1.CreateOptions{})
+					framework.ExpectNoError(err, "creating storage class")
+					defer f.ClientSet.StorageV1().StorageClasses().Delete(context.TODO(), sc.Name, metav1.DeleteOptions{})
+
+					ginkgo.By("Creating first PVC and writing data")
+					pvc1, err := createEFSPVCPVDynamicProvisioning(f.ClientSet, f.Namespace.Name, pvcName, sc.Name)
+					framework.ExpectNoError(err, "creating first pvc")
+
+					writeCommand := fmt.Sprintf("echo \"%s\" > %s", testData, writePath)
+					pod := e2epod.MakePod(f.Namespace.Name, nil, []*v1.PersistentVolumeClaim{pvc1}, admissionapi.LevelBaseline, writeCommand)
+					pod, err = f.ClientSet.CoreV1().Pods(f.Namespace.Name).Create(context.TODO(), pod, metav1.CreateOptions{})
+					framework.ExpectNoError(err, "creating write pod")
+					framework.ExpectNoError(e2epod.WaitForPodSuccessInNamespace(context.TODO(), f.ClientSet, pod.Name, f.Namespace.Name), "waiting for write pod success")
+					_ = f.ClientSet.CoreV1().Pods(f.Namespace.Name).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
+
+					ginkgo.By("Recording the PV name and VolumeHandle from first PVC")
+					pvc1, err = f.ClientSet.CoreV1().PersistentVolumeClaims(f.Namespace.Name).Get(context.TODO(), pvc1.Name, metav1.GetOptions{})
+					framework.ExpectNoError(err, "getting first pvc")
+					firstPVName := pvc1.Spec.VolumeName
+					firstPV, err := f.ClientSet.CoreV1().PersistentVolumes().Get(context.TODO(), firstPVName, metav1.GetOptions{})
+					framework.ExpectNoError(err, "getting first pv")
+					firstVolumeHandle := firstPV.Spec.CSI.VolumeHandle
+					framework.Logf("First PV name: %s, VolumeHandle: %s", firstPVName, firstVolumeHandle)
+
+					ginkgo.By("Deleting first PVC and waiting for it to be fully removed")
+					_ = f.ClientSet.CoreV1().PersistentVolumeClaims(f.Namespace.Name).Delete(context.TODO(), pvc1.Name, metav1.DeleteOptions{})
+					err = wait.PollUntilContextTimeout(context.TODO(), 5*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+						_, err := f.ClientSet.CoreV1().PersistentVolumeClaims(f.Namespace.Name).Get(ctx, pvc1.Name, metav1.GetOptions{})
+						if apierrors.IsNotFound(err) {
+							return true, nil
+						}
+						return false, err
+					})
+					framework.ExpectNoError(err, "waiting for first pvc deletion")
+
+					ginkgo.By("Deleting first PV and waiting for it to be fully removed")
+					_ = f.ClientSet.CoreV1().PersistentVolumes().Delete(context.TODO(), firstPVName, metav1.DeleteOptions{})
+					framework.ExpectNoError(e2epv.WaitForPersistentVolumeDeleted(context.TODO(), f.ClientSet, firstPVName, 5*time.Second, 2*time.Minute), "waiting for first pv deletion")
+
+					ginkgo.By("Creating second PVC with the same name to trigger access point reuse")
+					pvc2, err := createEFSPVCPVDynamicProvisioning(f.ClientSet, f.Namespace.Name, pvcName, sc.Name)
+					framework.ExpectNoError(err, "creating second pvc")
+					var secondPV *v1.PersistentVolume
+					defer func() {
+						// Delete PVC first so the Delete reclaim policy triggers CSI DeleteVolume for access point cleanup
+						_ = f.ClientSet.CoreV1().PersistentVolumeClaims(f.Namespace.Name).Delete(context.TODO(), pvc2.Name, metav1.DeleteOptions{})
+						if secondPV != nil {
+							_ = e2epv.WaitForPersistentVolumeDeleted(context.TODO(), f.ClientSet, secondPV.Name, 5*time.Second, 2*time.Minute)
+						}
+					}()
+
+					ginkgo.By("Verifying the same access point was reused")
+					pvs, err := e2epv.WaitForPVClaimBoundPhase(context.TODO(), f.ClientSet, []*v1.PersistentVolumeClaim{pvc2}, 5*time.Minute)
+					framework.ExpectNoError(err, "waiting for second pvc to be bound")
+					secondPV = pvs[0]
+					secondVolumeHandle := secondPV.Spec.CSI.VolumeHandle
+					framework.Logf("Second PV name: %s, VolumeHandle: %s", secondPV.Name, secondVolumeHandle)
+
+					// Switch reclaim policy to Delete so the reclaim controller cleans up the access point when PVC is deleted
+					secondPV.Spec.PersistentVolumeReclaimPolicy = v1.PersistentVolumeReclaimDelete
+					_, err = f.ClientSet.CoreV1().PersistentVolumes().Update(context.TODO(), secondPV, metav1.UpdateOptions{})
+					framework.ExpectNoError(err, "updating second pv reclaim policy to Delete")
+					if firstVolumeHandle != secondVolumeHandle {
+						ginkgo.Fail(fmt.Sprintf("Access point was not reused: first VolumeHandle %q != second VolumeHandle %q", firstVolumeHandle, secondVolumeHandle))
+					}
+
+					ginkgo.By("Reading data from second PVC to verify access point was reused")
+					readCommand := fmt.Sprintf("cat %s", writePath)
+					pod = e2epod.MakePod(f.Namespace.Name, nil, []*v1.PersistentVolumeClaim{pvc2}, admissionapi.LevelBaseline, "while true; do echo $(date -u); sleep 5; done")
+					pod, err = f.ClientSet.CoreV1().Pods(f.Namespace.Name).Create(context.TODO(), pod, metav1.CreateOptions{})
+					framework.ExpectNoError(err, "creating read pod")
+					defer f.ClientSet.CoreV1().Pods(f.Namespace.Name).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
+					framework.ExpectNoError(e2epod.WaitForPodNameRunningInNamespace(context.TODO(), f.ClientSet, pod.Name, f.Namespace.Name), "waiting for read pod running")
+
+					output := kubectl.RunKubectlOrDie(f.Namespace.Name, "exec", pod.Name, "--", "/bin/sh", "-c", readCommand)
+					output = strings.TrimSuffix(output, "\n")
+					framework.Logf("Read output: %s", output)
+
+					if output == "" {
+						ginkgo.Fail("Read data is empty -- access point was not reused.")
+					}
+					if output != testData {
+						ginkgo.Fail(fmt.Sprintf("Read data %q does not match written data %q -- access point may not have been reused.", output, testData))
 					}
 				})
 
