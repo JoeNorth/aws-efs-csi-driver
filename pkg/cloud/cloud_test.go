@@ -631,6 +631,135 @@ func TestFindAccessPointByClientToken(t *testing.T) {
 				mockctl.Finish()
 			},
 		},
+		{
+			name: "Success - clientToken found on second page",
+			testFunc: func(t *testing.T) {
+				mockctl, c, mockEfs, _ := setupTest(t)
+
+				nextToken := "page2"
+				page1 := &efs.DescribeAccessPointsOutput{
+					AccessPoints: []types.AccessPointDescription{
+						{
+							AccessPointId: aws.String("ap-other"),
+							FileSystemId:  aws.String(fsId),
+							ClientToken:   aws.String("differentToken"),
+							RootDirectory: &types.RootDirectory{Path: aws.String("/other")},
+							PosixUser:     &types.PosixUser{Gid: aws.Int64(Gid), Uid: aws.Int64(Uid)},
+						},
+					},
+					NextToken: &nextToken,
+				}
+				page2 := &efs.DescribeAccessPointsOutput{
+					AccessPoints: []types.AccessPointDescription{
+						{
+							AccessPointId: aws.String(accessPointId),
+							FileSystemId:  aws.String(fsId),
+							ClientToken:   aws.String(clientToken),
+							RootDirectory: &types.RootDirectory{Path: aws.String(path)},
+							PosixUser:     &types.PosixUser{Gid: aws.Int64(Gid), Uid: aws.Int64(Uid)},
+						},
+					},
+					NextToken: nil,
+				}
+
+				ctx := context.Background()
+				gomock.InOrder(
+					mockEfs.EXPECT().DescribeAccessPoints(gomock.Eq(ctx), gomock.Any(), gomock.Any()).Return(page1, nil),
+					mockEfs.EXPECT().DescribeAccessPoints(gomock.Eq(ctx), gomock.Any(), gomock.Any()).Return(page2, nil),
+				)
+				res, err := c.FindAccessPointByClientToken(ctx, clientToken, fsId, util.FileSystemTypeEFS)
+				if err != nil {
+					t.Fatalf("FindAccessPointByClientToken failed: %v", err)
+				}
+				if res == nil {
+					t.Fatal("Result is nil")
+				}
+				if res.AccessPointId != accessPointId {
+					t.Fatalf("AccessPointId mismatched. Expected: %v, Actual: %v", accessPointId, res.AccessPointId)
+				}
+
+				mockctl.Finish()
+			},
+		},
+		{
+			name: "Success - nil result if clientToken not found across multiple pages",
+			testFunc: func(t *testing.T) {
+				mockctl, c, mockEfs, _ := setupTest(t)
+
+				nextToken := "page2"
+				page1 := &efs.DescribeAccessPointsOutput{
+					AccessPoints: []types.AccessPointDescription{
+						{
+							AccessPointId: aws.String("ap-other1"),
+							FileSystemId:  aws.String(fsId),
+							ClientToken:   aws.String("otherToken1"),
+							RootDirectory: &types.RootDirectory{Path: aws.String("/other1")},
+							PosixUser:     &types.PosixUser{Gid: aws.Int64(Gid), Uid: aws.Int64(Uid)},
+						},
+					},
+					NextToken: &nextToken,
+				}
+				page2 := &efs.DescribeAccessPointsOutput{
+					AccessPoints: []types.AccessPointDescription{
+						{
+							AccessPointId: aws.String("ap-other2"),
+							FileSystemId:  aws.String(fsId),
+							ClientToken:   aws.String("otherToken2"),
+							RootDirectory: &types.RootDirectory{Path: aws.String("/other2")},
+							PosixUser:     &types.PosixUser{Gid: aws.Int64(Gid), Uid: aws.Int64(Uid)},
+						},
+					},
+					NextToken: nil,
+				}
+
+				ctx := context.Background()
+				gomock.InOrder(
+					mockEfs.EXPECT().DescribeAccessPoints(gomock.Eq(ctx), gomock.Any(), gomock.Any()).Return(page1, nil),
+					mockEfs.EXPECT().DescribeAccessPoints(gomock.Eq(ctx), gomock.Any(), gomock.Any()).Return(page2, nil),
+				)
+				res, err := c.FindAccessPointByClientToken(ctx, clientToken, fsId, util.FileSystemTypeEFS)
+				if err != nil {
+					t.Fatalf("FindAccessPointByClientToken failed: %v", err)
+				}
+				if res != nil {
+					t.Fatal("Result should be nil. No access point with the specified token")
+				}
+
+				mockctl.Finish()
+			},
+		},
+		{
+			name: "Fail - error on second page",
+			testFunc: func(t *testing.T) {
+				mockctl, c, mockEfs, _ := setupTest(t)
+
+				nextToken := "page2"
+				page1 := &efs.DescribeAccessPointsOutput{
+					AccessPoints: []types.AccessPointDescription{
+						{
+							AccessPointId: aws.String("ap-other"),
+							FileSystemId:  aws.String(fsId),
+							ClientToken:   aws.String("otherToken"),
+							RootDirectory: &types.RootDirectory{Path: aws.String("/other")},
+							PosixUser:     &types.PosixUser{Gid: aws.Int64(Gid), Uid: aws.Int64(Uid)},
+						},
+					},
+					NextToken: &nextToken,
+				}
+
+				ctx := context.Background()
+				gomock.InOrder(
+					mockEfs.EXPECT().DescribeAccessPoints(gomock.Eq(ctx), gomock.Any(), gomock.Any()).Return(page1, nil),
+					mockEfs.EXPECT().DescribeAccessPoints(gomock.Eq(ctx), gomock.Any(), gomock.Any()).Return(nil, errors.New("throttled")),
+				)
+				_, err := c.FindAccessPointByClientToken(ctx, clientToken, fsId, util.FileSystemTypeEFS)
+				if err == nil {
+					t.Fatal("Expected error on second page")
+				}
+
+				mockctl.Finish()
+			},
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, tc.testFunc)
@@ -736,6 +865,94 @@ func TestListAccessPoints(t *testing.T) {
 
 				if len(res) != 2 {
 					t.Fatalf("Expected two AccessPoints in response but got: %v", res)
+				}
+
+				mockctl.Finish()
+			},
+		},
+		{
+			name: "Success - pagination across multiple pages",
+			testFunc: func(t *testing.T) {
+				mockctl, c, mockEfs, _ := setupTest(t)
+
+				nextToken := "page2"
+				page1 := &efs.DescribeAccessPointsOutput{
+					AccessPoints: []types.AccessPointDescription{
+						{
+							AccessPointId: aws.String("ap-1"),
+							FileSystemId:  aws.String(fsId),
+							PosixUser: &types.PosixUser{
+								Gid: aws.Int64(Gid),
+								Uid: aws.Int64(Uid),
+							},
+						},
+					},
+					NextToken: &nextToken,
+				}
+				page2 := &efs.DescribeAccessPointsOutput{
+					AccessPoints: []types.AccessPointDescription{
+						{
+							AccessPointId: aws.String("ap-2"),
+							FileSystemId:  aws.String(fsId),
+							PosixUser: &types.PosixUser{
+								Gid: aws.Int64(1001),
+								Uid: aws.Int64(1001),
+							},
+						},
+					},
+					NextToken: nil,
+				}
+
+				ctx := context.Background()
+				gomock.InOrder(
+					mockEfs.EXPECT().DescribeAccessPoints(gomock.Eq(ctx), gomock.Any(), gomock.Any()).Return(page1, nil),
+					mockEfs.EXPECT().DescribeAccessPoints(gomock.Eq(ctx), gomock.Any(), gomock.Any()).Return(page2, nil),
+				)
+				res, err := c.ListAccessPoints(ctx, fsId, util.FileSystemTypeEFS)
+				if err != nil {
+					t.Fatalf("List Access Points failed: %v", err)
+				}
+				if len(res) != 2 {
+					t.Fatalf("Expected 2 access points but got %d", len(res))
+				}
+				if res[0].AccessPointId != "ap-1" {
+					t.Fatalf("First AP ID mismatched. Expected: ap-1, Actual: %v", res[0].AccessPointId)
+				}
+				if res[1].AccessPointId != "ap-2" {
+					t.Fatalf("Second AP ID mismatched. Expected: ap-2, Actual: %v", res[1].AccessPointId)
+				}
+
+				mockctl.Finish()
+			},
+		},
+		{
+			name: "Fail - error on second page",
+			testFunc: func(t *testing.T) {
+				mockctl, c, mockEfs, _ := setupTest(t)
+
+				nextToken := "page2"
+				page1 := &efs.DescribeAccessPointsOutput{
+					AccessPoints: []types.AccessPointDescription{
+						{
+							AccessPointId: aws.String("ap-1"),
+							FileSystemId:  aws.String(fsId),
+							PosixUser: &types.PosixUser{
+								Gid: aws.Int64(Gid),
+								Uid: aws.Int64(Uid),
+							},
+						},
+					},
+					NextToken: &nextToken,
+				}
+
+				ctx := context.Background()
+				gomock.InOrder(
+					mockEfs.EXPECT().DescribeAccessPoints(gomock.Eq(ctx), gomock.Any(), gomock.Any()).Return(page1, nil),
+					mockEfs.EXPECT().DescribeAccessPoints(gomock.Eq(ctx), gomock.Any(), gomock.Any()).Return(nil, errors.New("throttled")),
+				)
+				_, err := c.ListAccessPoints(ctx, fsId, util.FileSystemTypeEFS)
+				if err == nil {
+					t.Fatal("Expected error on second page")
 				}
 
 				mockctl.Finish()

@@ -423,7 +423,7 @@ func TestCreateVolume(t *testing.T) {
 				ctx := context.Background()
 
 				accessPoints := []*cloud.AccessPoint{}
-				for i := int64(0); i < cloud.AccessPointPerFsLimit; i++ {
+				for i := int64(0); i < AccessPointPerFsLimit; i++ {
 					gidMin, err := strconv.ParseInt(req.Parameters[GidMin], 10, 64)
 					if err != nil {
 						t.Fatalf("Failed to convert GidMax Parameter to int.")

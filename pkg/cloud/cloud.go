@@ -47,8 +47,8 @@ const (
 	AccessPointAlreadyExists        = "AccessPointAlreadyExists"
 	ConflictException               = "ConflictException"
 	PvcNameTagKey                   = "pvcName"
-	AccessPointPerFsLimit           = 10000
 	s3FilesListAccessPointsPageSize = 1000
+	efsDescribeAccessPointsPageSize = 1000
 )
 
 var (
@@ -393,6 +393,7 @@ func (c *cloud) DescribeAccessPoint(ctx context.Context, accessPointId string, f
 		for {
 			describeAPInput := &s3files.ListAccessPointsInput{
 				NextToken:    nextToken,
+				MaxResults:   aws.Int32(s3FilesListAccessPointsPageSize),
 				FileSystemId: &fileSystemId,
 			}
 
@@ -434,36 +435,43 @@ func (c *cloud) FindAccessPointByClientToken(ctx context.Context, clientToken, f
 
 	switch fsType {
 	case util.FileSystemTypeEFS:
-		// TODO: Use pagniation implementation to reduce the value of MaxResults
-		describeAPInput := &efs.DescribeAccessPointsInput{
-			FileSystemId: &fileSystemId,
-			MaxResults:   aws.Int32(AccessPointPerFsLimit), // 10000 is the uppper bound for MaxResults on efs DescribeAccessPoints
-		}
-		res, err := c.efs.DescribeAccessPoints(ctx, describeAPInput, func(o *efs.Options) {
-			o.Retryer = c.rm.describeAccessPointsRetryer
-		})
-		if err != nil {
-			if isAccessDenied(err) {
-				return nil, ErrAccessDenied
+		var nextToken *string
+		for {
+			describeAPInput := &efs.DescribeAccessPointsInput{
+				FileSystemId: &fileSystemId,
+				MaxResults:   aws.Int32(efsDescribeAccessPointsPageSize),
+				NextToken:    nextToken,
 			}
-			if isFileSystemNotFound(err) {
-				return nil, ErrNotFound
+			res, err := c.efs.DescribeAccessPoints(ctx, describeAPInput, func(o *efs.Options) {
+				o.Retryer = c.rm.describeAccessPointsRetryer
+			})
+			if err != nil {
+				if isAccessDenied(err) {
+					return nil, ErrAccessDenied
+				}
+				if isFileSystemNotFound(err) {
+					return nil, ErrNotFound
+				}
+				return nil, fmt.Errorf("failed to list Access Points of efs = %s : %v", fileSystemId, err)
 			}
-			return nil, fmt.Errorf("failed to list Access Points of efs = %s : %v", fileSystemId, err)
-		}
-		for _, ap := range res.AccessPoints {
-			// check if AP exists with same client token
-			if *ap.ClientToken == clientToken {
-				return &AccessPoint{
-					AccessPointId:      *ap.AccessPointId,
-					FileSystemId:       *ap.FileSystemId,
-					AccessPointRootDir: *ap.RootDirectory.Path,
-					PosixUser: &PosixUser{
-						Gid: *ap.PosixUser.Gid,
-						Uid: *ap.PosixUser.Uid,
-					},
-				}, nil
+			for _, ap := range res.AccessPoints {
+				// check if AP exists with same client token
+				if *ap.ClientToken == clientToken {
+					return &AccessPoint{
+						AccessPointId:      *ap.AccessPointId,
+						FileSystemId:       *ap.FileSystemId,
+						AccessPointRootDir: *ap.RootDirectory.Path,
+						PosixUser: &PosixUser{
+							Gid: *ap.PosixUser.Gid,
+							Uid: *ap.PosixUser.Uid,
+						},
+					}, nil
+				}
 			}
+			if res.NextToken == nil {
+				break
+			}
+			nextToken = res.NextToken
 		}
 		klog.V(2).Infof("Access point does not exist")
 		return nil, nil
@@ -477,40 +485,48 @@ func (c *cloud) FindAccessPointByClientToken(ctx context.Context, clientToken, f
 func (c *cloud) ListAccessPoints(ctx context.Context, fileSystemId string, fsType util.FileSystemType) (accessPoints []*AccessPoint, err error) {
 	switch fsType {
 	case util.FileSystemTypeEFS:
-		// TODO: Use pagniation implementation to reduce the value of MaxResults
-		describeAPInput := &efs.DescribeAccessPointsInput{
-			FileSystemId: &fileSystemId,
-			MaxResults:   aws.Int32(AccessPointPerFsLimit), // 10000 is the uppper bound for MaxResults on efs DescribeAccessPoints
-		}
-		res, err := c.efs.DescribeAccessPoints(ctx, describeAPInput, func(o *efs.Options) {
-			o.Retryer = c.rm.describeAccessPointsRetryer
-		})
-		if err != nil {
-			if isAccessDenied(err) {
-				return nil, ErrAccessDenied
+		var nextToken *string
+		for {
+			describeAPInput := &efs.DescribeAccessPointsInput{
+				FileSystemId: &fileSystemId,
+				MaxResults:   aws.Int32(efsDescribeAccessPointsPageSize),
+				NextToken:    nextToken,
 			}
-			if isFileSystemNotFound(err) {
-				return nil, ErrNotFound
-			}
-			return nil, fmt.Errorf("List Access Points failed: %v", err)
-		}
-
-		var posixUser *PosixUser
-		for _, accessPointDescription := range res.AccessPoints {
-			if accessPointDescription.PosixUser != nil {
-				posixUser = &PosixUser{
-					Gid: *accessPointDescription.PosixUser.Gid,
-					Uid: *accessPointDescription.PosixUser.Uid,
+			res, err := c.efs.DescribeAccessPoints(ctx, describeAPInput, func(o *efs.Options) {
+				o.Retryer = c.rm.describeAccessPointsRetryer
+			})
+			if err != nil {
+				if isAccessDenied(err) {
+					return nil, ErrAccessDenied
 				}
-			} else {
-				posixUser = nil
+				if isFileSystemNotFound(err) {
+					return nil, ErrNotFound
+				}
+				return nil, fmt.Errorf("List Access Points failed: %v", err)
 			}
-			accessPoint := &AccessPoint{
-				AccessPointId: *accessPointDescription.AccessPointId,
-				FileSystemId:  *accessPointDescription.FileSystemId,
-				PosixUser:     posixUser,
+
+			var posixUser *PosixUser
+			for _, accessPointDescription := range res.AccessPoints {
+				if accessPointDescription.PosixUser != nil {
+					posixUser = &PosixUser{
+						Gid: *accessPointDescription.PosixUser.Gid,
+						Uid: *accessPointDescription.PosixUser.Uid,
+					}
+				} else {
+					posixUser = nil
+				}
+				accessPoint := &AccessPoint{
+					AccessPointId: *accessPointDescription.AccessPointId,
+					FileSystemId:  *accessPointDescription.FileSystemId,
+					PosixUser:     posixUser,
+				}
+				accessPoints = append(accessPoints, accessPoint)
 			}
-			accessPoints = append(accessPoints, accessPoint)
+
+			if res.NextToken == nil {
+				break
+			}
+			nextToken = res.NextToken
 		}
 
 		return accessPoints, nil
@@ -519,7 +535,7 @@ func (c *cloud) ListAccessPoints(ctx context.Context, fileSystemId string, fsTyp
 		for {
 			describeAPInput := &s3files.ListAccessPointsInput{
 				FileSystemId: &fileSystemId,
-				MaxResults:   aws.Int32(s3FilesListAccessPointsPageSize), // 1000 is upper bound for MaxResults on s3files ListAccessPoints
+				MaxResults:   aws.Int32(s3FilesListAccessPointsPageSize),
 				NextToken:    nextToken,
 			}
 			res, err := c.s3files.ListAccessPoints(ctx, describeAPInput, func(o *s3files.Options) {
