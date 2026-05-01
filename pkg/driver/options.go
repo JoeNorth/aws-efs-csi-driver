@@ -13,26 +13,27 @@ const (
 )
 
 type Options struct {
-	Endpoint                    *string
-	Version                     *bool
-	EfsUtilsCfgDirPath          *string
-	EfsUtilsCfgLegacyDirPath    *string
-	EfsUtilsStaticFilesPath     *string
-	VolMetricsOptIn             *bool
-	VolMetricsRefreshPeriod     *float64
-	VolMetricsFsRateLimit       *int
-	DeleteAccessPointRootDir    *bool
-	AdaptiveRetryMode           *bool
-	Tags                        *string
-	MaxInflightMountCallsOptIn  *bool
-	MaxInflightMountCalls       *int64
-	VolumeAttachLimitOptIn      *bool
-	VolumeAttachLimit           *int64
-	ForceUnmountAfterTimeout    *bool
-	UnmountTimeout              *time.Duration
-	DebugLogs                   *bool
-	EfsCloudWatchLogEnabled     *bool
-	S3FilesCloudWatchLogEnabled *bool
+	Endpoint                        *string
+	Version                         *bool
+	EfsUtilsCfgDirPath              *string
+	EfsUtilsCfgLegacyDirPath        *string
+	EfsUtilsStaticFilesPath         *string
+	VolMetricsOptIn                 *bool
+	VolMetricsRefreshPeriod         *float64
+	VolMetricsFsRateLimit           *int
+	DeleteAccessPointRootDir        *bool
+	AdaptiveRetryMode               *bool
+	Tags                            *string
+	MaxInflightMountCallsOptIn      *bool
+	MaxInflightMountCalls           *int64
+	VolumeAttachLimitOptIn          *bool
+	VolumeAttachLimit               *int64
+	ForceUnmountAfterTimeout        *bool
+	UnmountTimeout                  *time.Duration
+	DebugLogs                       *bool
+	EfsCloudWatchLogEnabled         *bool
+	S3FilesCloudWatchLogEnabled     *bool
+	S3FilesCloudWatchMetricsEnabled *bool
 }
 
 func NewOptions() *Options {
@@ -47,17 +48,18 @@ func NewOptions() *Options {
 		VolMetricsFsRateLimit:    flag.Int("vol-metrics-fs-rate-limit", 5, "Volume metrics routines rate limiter per file system"),
 		DeleteAccessPointRootDir: flag.Bool("delete-access-point-root-dir", false,
 			"Opt in to delete access point root directory by DeleteVolume. By default, DeleteVolume will delete the access point behind Persistent Volume and deleting access point will not delete the access point root directory or its contents."),
-		AdaptiveRetryMode:           flag.Bool("adaptive-retry-mode", true, "Opt out to use standard sdk retry configuration. By default, adaptive retry mode will be used to more heavily client side rate limit EFS API requests."),
-		Tags:                        flag.String("tags", "", "Space separated key:value pairs which will be added as tags for EFS resources. For example, 'environment:prod region:us-east-1'"),
-		MaxInflightMountCallsOptIn:  flag.Bool("max-inflight-mount-calls-opt-in", false, "Opt in to use max inflight mount calls limit."),
-		MaxInflightMountCalls:       flag.Int64("max-inflight-mount-calls", UnsetMaxInflightMountCounts, "New NodePublishVolume operation will be blocked if maximum number of inflight calls is reached. If maxInflightMountCallsOptIn is true, it has to be set to a positive value."),
-		VolumeAttachLimitOptIn:      flag.Bool("volume-attach-limit-opt-in", false, "Opt in to use volume attach limit."),
-		VolumeAttachLimit:           flag.Int64("volume-attach-limit", UnsetVolumeAttachLimit, "Maximum number of volumes that can be attached to a node. If volumeAttachLimitOptIn is true, it has to be set to a positive value."),
-		ForceUnmountAfterTimeout:    flag.Bool("force-unmount-after-timeout", false, "Enable force unmount if normal unmount times out during NodeUnpublishVolume."),
-		UnmountTimeout:              flag.Duration("unmount-timeout", DefaultUnmountTimeout, "Timeout for unmounting a volume during NodePublishVolume when forceUnmountAfterTimeout is true. If the timeout is reached, the volume will be forcibly unmounted. The default value is 30 seconds."),
-		DebugLogs:                   flag.Bool("debug-logs", false, "Set klog verbosity to level 5 and enable debug logging in efs-utils."),
-		EfsCloudWatchLogEnabled:     flag.Bool("efs-cloudwatch-log-enabled", false, "Enable CloudWatch logging for EFS in efs-utils.conf."),
-		S3FilesCloudWatchLogEnabled: flag.Bool("s3files-cloudwatch-log-enabled", true, "Enable CloudWatch logging for S3Files in s3files-utils.conf."),
+		AdaptiveRetryMode:               flag.Bool("adaptive-retry-mode", true, "Opt out to use standard sdk retry configuration. By default, adaptive retry mode will be used to more heavily client side rate limit EFS API requests."),
+		Tags:                            flag.String("tags", "", "Space separated key:value pairs which will be added as tags for EFS resources. For example, 'environment:prod region:us-east-1'"),
+		MaxInflightMountCallsOptIn:      flag.Bool("max-inflight-mount-calls-opt-in", false, "Opt in to use max inflight mount calls limit."),
+		MaxInflightMountCalls:           flag.Int64("max-inflight-mount-calls", UnsetMaxInflightMountCounts, "New NodePublishVolume operation will be blocked if maximum number of inflight calls is reached. If maxInflightMountCallsOptIn is true, it has to be set to a positive value."),
+		VolumeAttachLimitOptIn:          flag.Bool("volume-attach-limit-opt-in", false, "Opt in to use volume attach limit."),
+		VolumeAttachLimit:               flag.Int64("volume-attach-limit", UnsetVolumeAttachLimit, "Maximum number of volumes that can be attached to a node. If volumeAttachLimitOptIn is true, it has to be set to a positive value."),
+		ForceUnmountAfterTimeout:        flag.Bool("force-unmount-after-timeout", false, "Enable force unmount if normal unmount times out during NodeUnpublishVolume."),
+		UnmountTimeout:                  flag.Duration("unmount-timeout", DefaultUnmountTimeout, "Timeout for unmounting a volume during NodePublishVolume when forceUnmountAfterTimeout is true. If the timeout is reached, the volume will be forcibly unmounted. The default value is 30 seconds."),
+		DebugLogs:                       flag.Bool("debug-logs", false, "Set klog verbosity to level 5 and enable debug logging in efs-utils."),
+		EfsCloudWatchLogEnabled:         flag.Bool("efs-cloudwatch-log-enabled", false, "Enable CloudWatch logging for EFS in efs-utils.conf."),
+		S3FilesCloudWatchLogEnabled:     flag.Bool("s3files-cloudwatch-log-enabled", true, "Enable CloudWatch logging for S3Files in s3files-utils.conf."),
+		S3FilesCloudWatchMetricsEnabled: flag.Bool("s3files-cloudwatch-metrics-enabled", true, "Enable CloudWatch metrics emission for S3 files in s3files-utils.conf."),
 	}
 }
 

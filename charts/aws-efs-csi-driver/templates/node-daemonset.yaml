@@ -95,6 +95,7 @@ spec:
             - --debug-logs={{ .Values.debugLogs }}
             - --efs-cloudwatch-log-enabled={{ hasKey .Values.node "efsCloudWatchLogEnabled" | ternary .Values.node.efsCloudWatchLogEnabled false }}
             - --s3files-cloudwatch-log-enabled={{ hasKey .Values.node "s3filesCloudWatchLogEnabled" | ternary .Values.node.s3filesCloudWatchLogEnabled true }}
+            - --s3files-cloudwatch-metrics-enabled={{ hasKey .Values.node "s3filesCloudWatchMetricsEnabled" | ternary .Values.node.s3filesCloudWatchMetricsEnabled true }}
           env:
             - name: CSI_ENDPOINT
               value: unix:/csi/csi.sock
