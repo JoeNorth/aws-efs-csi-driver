@@ -43,8 +43,9 @@ const (
 	S3FilesAccessPointMode = "s3files-ap"
 	AzName                 = "az"
 	BasePath               = "basePath"
+	AccessPointPerFsLimit  = int64(10000)
 	DefaultGidMin          = int64(50000)
-	DefaultGidMax          = DefaultGidMin + cloud.AccessPointPerFsLimit
+	DefaultGidMax          = DefaultGidMin + AccessPointPerFsLimit
 	DefaultTagKey          = "efs.csi.aws.com/cluster"
 	DefaultTagValue        = "true"
 	DirectoryPerms         = "directoryPerms"
