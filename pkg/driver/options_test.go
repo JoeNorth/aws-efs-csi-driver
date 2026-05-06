@@ -84,6 +84,12 @@ func TestParseFlagsWithDefaultValue(t *testing.T) {
 	if *opts.S3FilesCloudWatchMetricsEnabled != true {
 		t.Errorf("Expected s3files-cloudwatch-metrics-enabled true, got %v", *opts.S3FilesCloudWatchMetricsEnabled)
 	}
+	if *opts.EfsUtilsConfOverrides != "" {
+		t.Errorf("Expected efs-utils-conf-overrides empty, got '%s'", *opts.EfsUtilsConfOverrides)
+	}
+	if *opts.S3FilesUtilsConfOverrides != "" {
+		t.Errorf("Expected s3files-utils-conf-overrides empty, got '%s'", *opts.S3FilesUtilsConfOverrides)
+	}
 }
 
 func TestParseFlagsWithCustomValues(t *testing.T) {
@@ -199,6 +205,8 @@ func TestValidate(t *testing.T) {
 				MaxInflightMountCalls:      int64Ptr(UnsetMaxInflightMountCounts),
 				VolumeAttachLimitOptIn:     boolPtr(false),
 				VolumeAttachLimit:          int64Ptr(UnsetVolumeAttachLimit),
+				EfsUtilsConfOverrides:      strPtr(""),
+				S3FilesUtilsConfOverrides:  strPtr(""),
 			},
 			expectError: false,
 		},
@@ -209,6 +217,8 @@ func TestValidate(t *testing.T) {
 				MaxInflightMountCalls:      int64Ptr(0),
 				VolumeAttachLimitOptIn:     boolPtr(false),
 				VolumeAttachLimit:          int64Ptr(UnsetVolumeAttachLimit),
+				EfsUtilsConfOverrides:      strPtr(""),
+				S3FilesUtilsConfOverrides:  strPtr(""),
 			},
 			expectError: true,
 		},
@@ -219,6 +229,8 @@ func TestValidate(t *testing.T) {
 				MaxInflightMountCalls:      int64Ptr(UnsetMaxInflightMountCounts),
 				VolumeAttachLimitOptIn:     boolPtr(true),
 				VolumeAttachLimit:          int64Ptr(-1),
+				EfsUtilsConfOverrides:      strPtr(""),
+				S3FilesUtilsConfOverrides:  strPtr(""),
 			},
 			expectError: true,
 		},
@@ -229,8 +241,46 @@ func TestValidate(t *testing.T) {
 				MaxInflightMountCalls:      int64Ptr(10),
 				VolumeAttachLimitOptIn:     boolPtr(true),
 				VolumeAttachLimit:          int64Ptr(5),
+				EfsUtilsConfOverrides:      strPtr(""),
+				S3FilesUtilsConfOverrides:  strPtr(""),
 			},
 			expectError: false,
+		},
+		{
+			name: "valid efs-utils overrides",
+			opts: &Options{
+				MaxInflightMountCallsOptIn: boolPtr(false),
+				MaxInflightMountCalls:      int64Ptr(UnsetMaxInflightMountCounts),
+				VolumeAttachLimitOptIn:     boolPtr(false),
+				VolumeAttachLimit:          int64Ptr(UnsetVolumeAttachLimit),
+				EfsUtilsConfOverrides:      strPtr("mount-watchdog:stunnel_health_check_interval_min=1"),
+				S3FilesUtilsConfOverrides:  strPtr(""),
+			},
+			expectError: false,
+		},
+		{
+			name: "invalid efs-utils overrides",
+			opts: &Options{
+				MaxInflightMountCallsOptIn: boolPtr(false),
+				MaxInflightMountCalls:      int64Ptr(UnsetMaxInflightMountCounts),
+				VolumeAttachLimitOptIn:     boolPtr(false),
+				VolumeAttachLimit:          int64Ptr(UnsetVolumeAttachLimit),
+				EfsUtilsConfOverrides:      strPtr("invalid"),
+				S3FilesUtilsConfOverrides:  strPtr(""),
+			},
+			expectError: true,
+		},
+		{
+			name: "invalid s3files-utils overrides",
+			opts: &Options{
+				MaxInflightMountCallsOptIn: boolPtr(false),
+				MaxInflightMountCalls:      int64Ptr(UnsetMaxInflightMountCounts),
+				VolumeAttachLimitOptIn:     boolPtr(false),
+				VolumeAttachLimit:          int64Ptr(UnsetVolumeAttachLimit),
+				EfsUtilsConfOverrides:      strPtr(""),
+				S3FilesUtilsConfOverrides:  strPtr("invalid"),
+			},
+			expectError: true,
 		},
 	}
 
@@ -239,6 +289,16 @@ func TestValidate(t *testing.T) {
 			err := tc.opts.Validate()
 			if (err != nil) != tc.expectError {
 				t.Errorf("Validate() error = %v, expectError %v", err, tc.expectError)
+			}
+			if err == nil && *tc.opts.EfsUtilsConfOverrides != "" {
+				if len(tc.opts.efsUtilsConfOverridesParsed) == 0 {
+					t.Errorf("Expected efsUtilsConfOverridesParsed to be populated")
+				}
+			}
+			if err == nil && *tc.opts.S3FilesUtilsConfOverrides != "" {
+				if len(tc.opts.s3filesUtilsConfOverridesParsed) == 0 {
+					t.Errorf("Expected s3filesUtilsConfOverridesParsed to be populated")
+				}
 			}
 		})
 	}
@@ -250,4 +310,8 @@ func boolPtr(b bool) *bool {
 
 func int64Ptr(i int64) *int64 {
 	return &i
+}
+
+func strPtr(s string) *string {
+	return &s
 }

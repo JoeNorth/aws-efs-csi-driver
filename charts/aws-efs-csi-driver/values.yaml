@@ -232,6 +232,13 @@ node:
   #  maxSurge: 0
   #  maxUnavailable: 20%
 
+  # Comma-separated section:key=value overrides for efs-utils.conf.
+  # Example: "mount-watchdog:stunnel_health_check_interval_min=1,mount-watchdog:tls_cert_renewal_interval_min=30"
+  efsUtilsConfOverrides: ""
+  # Comma-separated section:key=value overrides for s3files-utils.conf.
+  # Example: "proxy:read_bypass_denylist_size=20000"
+  s3filesUtilsConfOverrides: ""
+
 storageClasses: []
 # Add StorageClass resources like:
 # - name: efs-sc
