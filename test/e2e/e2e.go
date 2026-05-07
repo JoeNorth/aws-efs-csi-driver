@@ -602,7 +602,7 @@ var _ = ginkgo.Describe("[efs-csi]", func() {
 					}
 				})
 
-				ginkgo.It("should continue reading/writing after the driver pod is restarted", func() {
+				ginkgo.It("should continue reading/writing after the driver pod is restarted", ginkgo.Serial, func() {
 					const FilePath = "/mnt/testfile.txt"
 					const TestDuration = 30 * time.Second
 
