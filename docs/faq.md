@@ -69,3 +69,6 @@ This configuration uses standard (non-FIPS) endpoints for control plane API call
 - s2n-tls library in FIPS mode for FIPS-compliant TLS operations
 - Security policy restricting TLS handshake negotiation to FIPS-approved algorithms only
 - FIPS-validated cryptography module: AWS-LC-FIPS (CSI driver v2.1.15+) or OpenSSL compiled with FIPS-validated libcrypto and FIPS enabled at OS level (CSI driver v2.1.14 or lower versions); runtime switch between FIPS and non-FIPS is not supported for cryptograhy module. 
+
+## Tenant Isolation
+Refer to the [EKS Best Practices Guide on Tenant Isolation](https://docs.aws.amazon.com/eks/latest/best-practices/tenant-isolation.html).
