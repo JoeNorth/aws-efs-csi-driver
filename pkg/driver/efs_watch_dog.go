@@ -491,7 +491,11 @@ func (w *execWatchdog) writeConfigFile(fileName, templateContent string, cfg uti
 
 	content := buf.String()
 	if len(overrides) > 0 {
-		content = applyConfOverrides(content, overrides)
+		var err error
+		content, err = applyConfOverrides(content, overrides)
+		if err != nil {
+			return fmt.Errorf("failed to apply config overrides for %s: %w", fileName, err)
+		}
 		for _, o := range overrides {
 			klog.Infof("Applied config override in %s: [%s] %s = %s", fileName, o.Section, o.Key, o.Value)
 		}

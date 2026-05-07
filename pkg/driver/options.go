@@ -66,8 +66,8 @@ func NewOptions() *Options {
 		EfsCloudWatchLogEnabled:         flag.Bool("efs-cloudwatch-log-enabled", false, "Enable CloudWatch logging for EFS in efs-utils.conf."),
 		S3FilesCloudWatchLogEnabled:     flag.Bool("s3files-cloudwatch-log-enabled", true, "Enable CloudWatch logging for S3Files in s3files-utils.conf."),
 		S3FilesCloudWatchMetricsEnabled: flag.Bool("s3files-cloudwatch-metrics-enabled", true, "Enable CloudWatch metrics emission for S3 files in s3files-utils.conf."),
-		EfsUtilsConfOverrides:           flag.String("efs-utils-conf-overrides", "", "Comma-separated section:key=value overrides for efs-utils.conf"),
-		S3FilesUtilsConfOverrides:       flag.String("s3files-utils-conf-overrides", "", "Comma-separated section:key=value overrides for s3files-utils.conf"),
+		EfsUtilsConfOverrides:           flag.String("efs-utils-conf-overrides", "", "Comma-separated section:key=value overrides applied to efs-utils.conf. These take precedence over other flags that control the same config (e.g., efs-cloudwatch-log-enabled)."),
+		S3FilesUtilsConfOverrides:       flag.String("s3files-utils-conf-overrides", "", "Comma-separated section:key=value overrides applied to s3files-utils.conf. These take precedence over other flags that control the same config (e.g., s3files-cloudwatch-log-enabled, s3files-cloudwatch-metrics-enabled)."),
 	}
 }
 

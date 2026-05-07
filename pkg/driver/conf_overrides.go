@@ -43,9 +43,10 @@ func parseConfOverrides(raw string) ([]ConfOverride, error) {
 }
 
 // applyConfOverrides applies parsed overrides to an INI-style config string.
-func applyConfOverrides(config string, overrides []ConfOverride) string {
+// Returns an error if a section or key does not exist in the config (including commented-out keys).
+func applyConfOverrides(config string, overrides []ConfOverride) (string, error) {
 	if len(overrides) == 0 {
-		return config
+		return config, nil
 	}
 	lines := strings.Split(config, "\n")
 	for _, o := range overrides {
@@ -58,7 +59,7 @@ func applyConfOverrides(config string, overrides []ConfOverride) string {
 			}
 		}
 		if sectionIdx < 0 {
-			continue
+			return "", fmt.Errorf("section [%s] not found in config", o.Section)
 		}
 
 		nextSectionIdx := len(lines)
@@ -73,25 +74,37 @@ func applyConfOverrides(config string, overrides []ConfOverride) string {
 		replaced := false
 		for i := sectionIdx + 1; i < nextSectionIdx; i++ {
 			trimmed := strings.TrimSpace(lines[i])
-			if strings.HasPrefix(trimmed, "#") {
-				continue
-			}
-			eqPos := strings.Index(trimmed, "=")
-			if eqPos < 0 {
-				continue
-			}
-			existingKey := strings.TrimSpace(trimmed[:eqPos])
-			if existingKey == o.Key {
-				lines[i] = o.Key + " = " + o.Value
-				replaced = true
-				break
+			// Check uncommented key=value lines
+			if !strings.HasPrefix(trimmed, "#") {
+				eqPos := strings.Index(trimmed, "=")
+				if eqPos < 0 {
+					continue
+				}
+				existingKey := strings.TrimSpace(trimmed[:eqPos])
+				if existingKey == o.Key {
+					lines[i] = o.Key + " = " + o.Value
+					replaced = true
+					break
+				}
+			} else {
+				// Check commented-out key=value lines (e.g., "# key = value")
+				uncommented := strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
+				eqPos := strings.Index(uncommented, "=")
+				if eqPos < 0 {
+					continue
+				}
+				existingKey := strings.TrimSpace(uncommented[:eqPos])
+				if existingKey == o.Key {
+					lines[i] = o.Key + " = " + o.Value
+					replaced = true
+					break
+				}
 			}
 		}
 
 		if !replaced {
-			newLine := o.Key + " = " + o.Value
-			lines = append(lines[:nextSectionIdx], append([]string{newLine}, lines[nextSectionIdx:]...)...)
+			return "", fmt.Errorf("key %q not found in section [%s]", o.Key, o.Section)
 		}
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), nil
 }

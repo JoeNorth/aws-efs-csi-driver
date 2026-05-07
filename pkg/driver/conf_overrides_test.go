@@ -53,6 +53,8 @@ func TestApplyConfOverrides(t *testing.T) {
 		name      string
 		config    string
 		overrides []ConfOverride
+		wantErr   bool
+		errMsg    string
 		check     func(string) bool
 		desc      string
 	}{
@@ -69,16 +71,6 @@ func TestApplyConfOverrides(t *testing.T) {
 			overrides: []ConfOverride{{Section: "mount-watchdog", Key: "stunnel_health_check_interval_min", Value: "1"}},
 			check:     func(s string) bool { return strings.Contains(s, "stunnel_health_check_interval_min = 1") },
 			desc:      "key replaced",
-		},
-		{
-			name:      "append new key",
-			config:    "[mount-watchdog]\nenabled = true\n\n[client-info]\nsource=k8s\n",
-			overrides: []ConfOverride{{Section: "mount-watchdog", Key: "new_key", Value: "new_value"}},
-			check: func(s string) bool {
-				return strings.Contains(s, "new_key = new_value") &&
-					strings.Index(s, "new_key = new_value") < strings.Index(s, "[client-info]")
-			},
-			desc: "new key appended before next section",
 		},
 		{
 			name:   "multiple overrides same section",
@@ -107,16 +99,42 @@ func TestApplyConfOverrides(t *testing.T) {
 			desc: "both sections updated",
 		},
 		{
-			name:      "non-existent section ignored",
+			name:      "non-existent section returns error",
 			config:    "[mount-watchdog]\nenabled = true\n",
 			overrides: []ConfOverride{{Section: "nonexistent", Key: "key", Value: "value"}},
-			check:     func(s string) bool { return !strings.Contains(s, "key = value") },
-			desc:      "non-existent section skipped",
+			wantErr:   true,
+			errMsg:    "section [nonexistent] not found",
+		},
+		{
+			name:      "non-existent key returns error",
+			config:    "[mount-watchdog]\nenabled = true\n",
+			overrides: []ConfOverride{{Section: "mount-watchdog", Key: "no_such_key", Value: "value"}},
+			wantErr:   true,
+			errMsg:    "key \"no_such_key\" not found in section [mount-watchdog]",
+		},
+		{
+			name:      "commented-out key gets uncommented and replaced",
+			config:    "[proxy]\nmetrics_enabled = true\n# read_bypass_denylist_size = 10000\n",
+			overrides: []ConfOverride{{Section: "proxy", Key: "read_bypass_denylist_size", Value: "20000"}},
+			check:     func(s string) bool { return strings.Contains(s, "read_bypass_denylist_size = 20000") },
+			desc:      "commented key uncommented and replaced",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := applyConfOverrides(tc.config, tc.overrides)
+			result, err := applyConfOverrides(tc.config, tc.overrides)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.errMsg)
+				}
+				if !strings.Contains(err.Error(), tc.errMsg) {
+					t.Fatalf("expected error containing %q, got %q", tc.errMsg, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if !tc.check(result) {
 				t.Errorf("applyConfOverrides failed (%s), got:\n%s", tc.desc, result)
 			}
