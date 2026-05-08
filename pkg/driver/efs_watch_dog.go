@@ -14,6 +14,7 @@ limitations under the License.
 package driver
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -329,6 +330,10 @@ type execWatchdog struct {
 	s3filesCloudWatchLogEnabled bool
 	// enable CloudWatch metrics for S3Files proxy
 	s3filesCloudWatchMetricsEnabled bool
+	// conf overrides for efs-utils.conf
+	efsUtilsConfOverrides []ConfOverride
+	// conf overrides for s3files-utils.conf
+	s3filesUtilsConfOverrides []ConfOverride
 	// stopCh indicates if it should be stopped
 	stopCh chan struct{}
 
@@ -345,7 +350,7 @@ type utilsConfig struct {
 	CloudWatchMetricsEnabled bool
 }
 
-func newExecWatchdog(efsUtilsCfgPath, efsUtilsStaticFilesPath string, debugLogs, efsCloudWatchLogEnabled, s3filesCloudWatchLogEnabled, s3filesCloudWatchMetricsEnabled bool, cmd string, arg ...string) Watchdog {
+func newExecWatchdog(efsUtilsCfgPath, efsUtilsStaticFilesPath string, debugLogs, efsCloudWatchLogEnabled, s3filesCloudWatchLogEnabled, s3filesCloudWatchMetricsEnabled bool, efsUtilsConfOverrides, s3filesUtilsConfOverrides []ConfOverride, cmd string, arg ...string) Watchdog {
 	return &execWatchdog{
 		efsUtilsCfgPath:                 efsUtilsCfgPath,
 		efsUtilsStaticFilesPath:         efsUtilsStaticFilesPath,
@@ -353,6 +358,8 @@ func newExecWatchdog(efsUtilsCfgPath, efsUtilsStaticFilesPath string, debugLogs,
 		efsCloudWatchLogEnabled:         efsCloudWatchLogEnabled,
 		s3filesCloudWatchLogEnabled:     s3filesCloudWatchLogEnabled,
 		s3filesCloudWatchMetricsEnabled: s3filesCloudWatchMetricsEnabled,
+		efsUtilsConfOverrides:           efsUtilsConfOverrides,
+		s3filesUtilsConfOverrides:       s3filesUtilsConfOverrides,
 		execCmd:                         cmd,
 		execArg:                         arg,
 		stopCh:                          make(chan struct{}),
@@ -462,28 +469,41 @@ func (w *execWatchdog) updateConfig(efsClientSource string) error {
 
 	efsCfg := cfg
 	efsCfg.CloudWatchLogEnabled = w.efsCloudWatchLogEnabled
-	if err := w.writeConfigFile(efsUtilsConfigFileName, efsUtilsConfigTemplate, efsCfg); err != nil {
+	if err := w.writeConfigFile(efsUtilsConfigFileName, efsUtilsConfigTemplate, efsCfg, w.efsUtilsConfOverrides); err != nil {
 		return err
 	}
 
 	s3filesCfg := cfg
 	s3filesCfg.CloudWatchLogEnabled = w.s3filesCloudWatchLogEnabled
 	s3filesCfg.CloudWatchMetricsEnabled = w.s3filesCloudWatchMetricsEnabled
-	if err := w.writeConfigFile(s3filesUtilsConfigFileName, s3filesUtilsConfigTemplate, s3filesCfg); err != nil {
+	if err := w.writeConfigFile(s3filesUtilsConfigFileName, s3filesUtilsConfigTemplate, s3filesCfg, w.s3filesUtilsConfOverrides); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (w *execWatchdog) writeConfigFile(fileName, templateContent string, cfg utilsConfig) error {
+func (w *execWatchdog) writeConfigFile(fileName, templateContent string, cfg utilsConfig, overrides []ConfOverride) error {
 	tmpl := template.Must(template.New(fileName).Parse(templateContent))
-	f, err := os.Create(filepath.Join(w.efsUtilsCfgPath, fileName))
-	if err != nil {
-		return fmt.Errorf("cannot create config file %s. Error: %v", fileName, err)
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, cfg); err != nil {
+		return fmt.Errorf("cannot render config %s. Error: %v", fileName, err)
 	}
-	defer f.Close()
-	if err = tmpl.Execute(f, cfg); err != nil {
-		return fmt.Errorf("cannot update config %s. Error: %v", fileName, err)
+
+	content := buf.String()
+	if len(overrides) > 0 {
+		var err error
+		content, err = applyConfOverrides(content, overrides)
+		if err != nil {
+			return fmt.Errorf("failed to apply config overrides for %s: %w", fileName, err)
+		}
+		for _, o := range overrides {
+			klog.Infof("Applied config override in %s: [%s] %s = %s", fileName, o.Section, o.Key, o.Value)
+		}
+	}
+
+	filePath := filepath.Join(w.efsUtilsCfgPath, fileName)
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("cannot write config file %s. Error: %v", fileName, err)
 	}
 	return nil
 }
