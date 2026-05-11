@@ -33,10 +33,27 @@ FROM public.ecr.aws/eks-distro-build-tooling/python:3.11-gcc-al23 as rpm-provide
 # Install efs-utils from github by default. It can be overriden to `yum` with --build-arg when building the Docker image.
 # If value of `EFSUTILSSOURCE` build arg is overriden with `yum`, docker will install efs-utils from Amazon Linux 2's yum repo.
 ARG EFSUTILSSOURCE=github
+# When EFSUTILSSOURCE=local, copy efs-utils.tar.gz to the repo root before building:
+#   cp /path/to/efs-utils.tar.gz ./efs-utils.tar.gz
+#   docker build --build-arg EFSUTILSSOURCE=local .
+COPY efs-utils.tar.gz* /tmp/efs-utils-local/
 RUN mkdir -p /tmp/rpms && \
     if [ "$EFSUTILSSOURCE" = "yum" ]; \
     then echo "Installing efs-utils from Amazon Linux 2 yum repo" && \
          yum -y install --downloadonly --downloaddir=/tmp/rpms amazon-efs-utils-1.35.0-1.amzn2.noarch; \
+    elif [ "$EFSUTILSSOURCE" = "local" ]; \
+    then echo "Installing efs-utils from local tarball" && \
+         yum -y install systemd rpm-build make openssl-devel golang cmake && \
+         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+         source $HOME/.cargo/env && \
+         rustup update && \
+         rustup default stable && \
+         mkdir -p /tmp/efs-utils-src && \
+         tar -xzf /tmp/efs-utils-local/efs-utils.tar.gz -C /tmp/efs-utils-src --strip-components=1 && \
+         cd /tmp/efs-utils-src && \
+         make rpm-without-system-rust && mv build/amazon-efs-utils*rpm /tmp/rpms && \
+         cd / && rm -rf /tmp/efs-utils-src /tmp/efs-utils-local && \
+         yum clean all; \
     else echo "Installing efs-utils from github using the latest git tag" && \
          yum -y install systemd git rpm-build make openssl-devel curl golang cmake && \
          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
