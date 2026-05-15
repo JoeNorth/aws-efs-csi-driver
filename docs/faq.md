@@ -70,5 +70,15 @@ This configuration uses standard (non-FIPS) endpoints for control plane API call
 - Security policy restricting TLS handshake negotiation to FIPS-approved algorithms only
 - FIPS-validated cryptography module: AWS-LC-FIPS (CSI driver v2.1.15+) or OpenSSL compiled with FIPS-validated libcrypto and FIPS enabled at OS level (CSI driver v2.1.14 or lower versions); runtime switch between FIPS and non-FIPS is not supported for cryptograhy module. 
 
+## Cross-account: what happens if a mount target's AZ goes down?
+
+It depends on which provisioning mode you used (see the [cross-account mount example](../examples/kubernetes/efs/cross_account_mount/README.md) and [parameters reference](parameters.md#cross-account-provisioning)):
+
+- **DNS mode** (`crossaccount=true` in the secret) — each node resolves a mount target via DNS at mount time, so pods on healthy AZs keep working. Existing pods on the failed AZ lose connectivity until they are rescheduled.
+- **Default per-node AZ selection** (no `az`, no `crossaccount`) — the controller resolves all available mount targets at provisioning time. Each node selects its own AZ's mount target; if a node's AZ has no mount target, it falls back to any available one (logged as a warning). Pods running on healthy AZs keep working.
+- **Pinned AZ** (StorageClass `az=<zone>`) — every pod uses the mount target in `<zone>`. If that AZ goes down, all pods using this StorageClass lose connectivity.
+
+If you are still on a driver version that baked a single random mount target IP into every PV, upgrade to `v3.1.0` or newer to get the default per-node AZ selection feature.
+
 ## Tenant Isolation
 Refer to the [EKS Best Practices Guide on Tenant Isolation](https://docs.aws.amazon.com/eks/latest/best-practices/tenant-isolation.html).
