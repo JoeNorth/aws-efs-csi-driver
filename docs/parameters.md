@@ -13,7 +13,7 @@
 | basePath              |        |                 | true     | Path under which access points for dynamic provisioning is created. If this parameter is not specified, access points are created under the root directory of the file system                                                                                                                                                                                                                 |
 | subPathPattern        |        | `/${.PV.name}`  | true     | The template used to construct the subPath under which each of the access points created under Dynamic Provisioning. Can be made up of fixed strings and limited variables, is akin to the 'subPathPattern' variable on the [nfs-subdir-external-provisioner](https://github.com/kubernetes-sigs/nfs-subdir-external-provisioner) chart. Supports `.PVC.name`,`.PVC.namespace` and `.PV.name` |
 | ensureUniqueDirectory |        | true            | true     | **NOTE: Only set this to false if you're sure this is the behaviour you want**.<br/> Used when dynamic provisioning is enabled, if set to true, appends the a UID to the pattern specified in `subPathPattern` to ensure that access points will not accidentally point at the same directory.                                                                                                |
-| az                    |        | ""              | true     | Used for cross-account mount. If specified, the mount target in the given AZ is used. If not specified, the driver passes all available mount target IPs to each node, which selects the mount target matching its own AZ. If no mount target is available in the node's AZ, a random available mount target is selected.  |
+| az                    |        | ""              | true     | Used for cross-account dynamic provisioning. When set, the controller prefers the mount target in this Availability Zone; if none exists in that AZ, it falls back to a random available mount target. When unset, the controller resolves all available mount targets and each CSI node selects the mount target in its own AZ at mount time, with fallback to any available mount target if the node's AZ has none. See [Cross-account provisioning](#cross-account-provisioning) for the full behavior matrix. |
 | enforceZoneAffinity | true/false | false       | true     | When set to `true`, queries the availability zone of the EFS filesystem and returns CSI topology constraints. For One Zone EFS filesystems, this ensures pods are scheduled only in the zone where the filesystem is located. Regional EFS filesystems (multi-AZ) will have no topology constraints. Supports both `volumeBindingMode` values: `Immediate` and `WaitForFirstConsumer`. |
 | reuseAccessPoint      |        | false           | true     | When set to true, it creates the Access Point client-token from the provided PVC name. So that the AccessPoint can be replicated from a different cluster if same PVC name and storageclass configuration are used. This feature is currently only supported for a single filesystem per account/region. If attempting to reuse access points across multiple clusters and filesystems within the same region, volume provisioning will fail. If you wish to use the same EFS accesspoint across different clusters for multiple filesystems in a single region, we recommend manually creating the access points and [statically provisioning](https://github.com/kubernetes-sigs/aws-efs-csi-driver/tree/master/examples/kubernetes/access_points) those volumes.                                                                                                                                                                            |
 
@@ -21,11 +21,43 @@
 * **Filesystem ID Source (marked with \*)**: Exactly one of `fileSystemId`, `fileSystemIdConfigRef`, or `fileSystemIdSecretRef` must be specified to provide the EFS filesystem ID. For detailed usage guide, see the [ConfigMap and Secret Resolution Guide](./filesystem-id-resolution.md).
 * Custom Posix group Id range for Access Point root directory must include both `gidRangeStart` and `gidRangeEnd` parameters. These parameters are optional only if both are omitted. If you specify one, the other becomes mandatory.
 * When using a custom Posix group ID range, there is a possibility for the driver to run out of available POSIX group Ids. We suggest ensuring custom group ID range is large enough or create a new storage class with a new file system to provision additional volumes. 
-* `az` under storage class parameter is not to be confused with efs-utils mount option `az`. The `az` mount option is used for cross-AZ mount or EFS one-zone file system mount within the same AWS account as the cluster.
+* The StorageClass `az` parameter (cross-account dynamic provisioning) is distinct from the efs-utils `az` mount option. The mount option is consumed by efs-utils on the node for cross-AZ or EFS One Zone mounts and can be passed via `mountOptions` on the PV/StorageClass; the StorageClass `az` parameter only influences which mount target the controller selects at provisioning time when the secret carries `awsRoleArn`.
 * Using dynamic provisioning, [user identity enforcement]((https://docs.aws.amazon.com/efs/latest/ug/efs-access-points.html#enforce-identity-access-points)) is always applied.
  * When user enforcement is enabled, Amazon EFS replaces the NFS client's user and group IDs with the identity configured on the access point for all file system operations.
  * The uid/gid configured on the access point is either the uid/gid specified in the storage class, a value in the gidRangeStart-gidRangeEnd (used as both uid/gid) specified in the storage class, or is a value selected by the driver is no uid/gid or gidRange is specified.
  * We suggest using [static provisioning](https://github.com/kubernetes-sigs/aws-efs-csi-driver/blob/master/examples/kubernetes/static_provisioning/README.md) if you do not wish to use user identity enforcement.
+
+### Cross-account provisioning
+
+Cross-account provisioning lets an EKS cluster in account `A` mount EFS file systems owned by another account `B`. Drive it through the provisioner secret keys below; for the IAM/VPC peering prerequisites and full walk-through, see [examples/kubernetes/efs/cross_account_mount/README.md](../examples/kubernetes/efs/cross_account_mount/README.md).
+
+**Provisioner secret keys**
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `awsRoleArn` | yes (for cross-account) | IAM role in account `B` that the controller assumes via STS to call EFS APIs. |
+| `externalId` | no | External ID required by the role's trust policy, if configured. |
+| `crossaccount` | no | Set to `"true"` to use efs-utils DNS-based cross-account resolution at the node and skip baking a mount target IP into the PV. Defaults to `false`. Has [efs-utils prerequisites](https://github.com/aws/efs-utils?tab=readme-ov-file#crossaccount-option-prerequisites). |
+
+**Dynamic provisioning behavior** (when the provisioner secret has `awsRoleArn`)
+
+| Trigger | PV `volumeAttributes` written | Mount-time behavior |
+|---------|-------------------------------|---------------------|
+| Secret has `crossaccount=true` | `crossaccount: "true"` | Each node uses efs-utils DNS to resolve a mount target in its own AZ. No mount target IP is baked into the PV. |
+| StorageClass has `az=<zone>` (and `crossaccount` is unset/`false`) | `mounttargetip: <ip>` | Every node uses the single mount target IP baked into the PV. If no mount target exists in the specified AZ, the controller falls back to a random available mount target. |
+| Neither set (default) | (internal AZ→IP mapping) | Each node selects the mount target in its own AZ; if absent, falls back to any available mount target (with a warning). |
+
+**Static provisioning `volumeAttributes` accepted on the PV** (see [`pkg/driver/node.go`](../pkg/driver/node.go))
+
+| Key | Description |
+|-----|-------------|
+| `encryptInTransit` | `"true"` (default) or `"false"` to disable TLS. |
+| `mounttargetip` | Explicit mount target IPv4/IPv6 address. Use when you have already chosen the target — for example a same-VPC peer or a single-AZ workload. |
+| `crossaccount` | `"true"` to mount via efs-utils DNS resolution (cross-account). Requires the [efs-utils crossaccount prerequisites](https://github.com/aws/efs-utils?tab=readme-ov-file#crossaccount-option-prerequisites) on each node. Not supported for S3 Files file systems. |
+
+The static PV does not accept an `az` key — to pin a static cross-account PV to a specific AZ, set `mounttargetip` directly.
+
+**Cleanup behavior** — When `delete-access-point-root-dir=true`, `DeleteVolume` mounts the file system from the controller to remove the access point's root directory. For cross-account PVs without `crossaccount=true`, the cleanup mount selects the mount target in the controller node's own AZ when one exists, falling back to any available target.
 
 ---
 If you want to pass any other mountOptions to Amazon EFS CSI driver while mounting, they can be passed in through the Persistent Volume or the Storage Class objects, depending on whether static or dynamic provisioning is used. The following are examples of some mountOptions that can be passed:

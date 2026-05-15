@@ -19,7 +19,7 @@ Amazon EFS CSI driver supports dynamic provisioning and static provisioning.
 * Dynamic provisioning - Uses a persistent volume claim (PVC) to dynamically provision a persistent volume (PV). On creating a PVC, Kubernetes requests an Amazon EFS or Amazon S3 file system to create an access point in a file system which will be used to mount the PV.
 * Mount options - Mount options can be specified in the persistent volume (PV) or storage class for dynamic provisioning to define how the volume should be mounted.
 * Encryption of data in transit - Amazon EFS and Amazon S3 file systems are mounted with encryption in transit enabled by default in the master branch version of the driver.
-* Cross account mount (Amazon EFS only) - Amazon EFS file systems from different AWS accounts can be mounted from an Amazon EKS cluster.
+* Cross account mount (Amazon EFS only) - Amazon EFS file systems from different AWS accounts can be mounted from an Amazon EKS cluster, with three provisioning modes: efs-utils DNS resolution (`crossaccount=true`), pinned-AZ mount target (`az` parameter), and a per-node AZ→IP map for AZ resilience without DNS prerequisites. See the [cross-account mount example](../examples/kubernetes/efs/cross_account_mount/README.md) and [parameters reference](parameters.md#cross-account-provisioning).
 * Multiarch - Amazon EFS CSI driver image is now multiarch on ECR
 
 The following CSI interfaces are implemented:
