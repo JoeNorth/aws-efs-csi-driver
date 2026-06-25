@@ -18,11 +18,14 @@ package driver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -61,6 +64,29 @@ const (
 	GiB                                 = 1024 * 1024 * 1024
 	minMemoryInBytesToEnableS3ReadCache = 30 * GiB
 )
+
+type efsVolumeMeta struct {
+	SchemaVersion int                  `json:"schemaVersion"`
+	Target        string               `json:"target"`
+	FsType        string               `json:"fsType"`
+	VolumeHandle  efsVolumeHandleMeta  `json:"volumeHandle"`
+	VolumeContext efsVolumeContextMeta `json:"volumeContext"`
+	MountFlags    []string             `json:"mountFlags"`
+	ReadOnly      bool                 `json:"readOnly"`
+	Iam           bool                 `json:"iam"`
+}
+
+type efsVolumeHandleMeta struct {
+	FileSystemID  string `json:"fileSystemId"`
+	ExportPath    string `json:"exportPath"`
+	AccessPointID string `json:"accessPointId,omitempty"`
+}
+
+type efsVolumeContextMeta struct {
+	EncryptInTransit bool   `json:"encryptInTransit"`
+	MountTargetIP    string `json:"mountTargetIp,omitempty"`
+	CrossAccount     bool   `json:"crossAccount"`
+}
 
 func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "")
@@ -108,6 +134,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	subpath := "/"
 	encryptInTransit := true
 	crossAccountDNSEnabled := false
+	resolvedMountTargetIP := ""
 	volContext := req.GetVolumeContext()
 	for k, v := range volContext {
 		switch strings.ToLower(k) {
@@ -123,6 +150,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 			if net.ParseIP(v) == nil {
 				return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("Volume context property %q=%q is not a valid IP address", k, v))
 			}
+			resolvedMountTargetIP = v
 			mountOptions = append(mountOptions, MountTargetIp+"="+v)
 		case MountTargetIpMap:
 			// Parse the AZ→IP map passed from the controller and select the mount target
@@ -134,11 +162,13 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 			}
 			nodeAZ := d.cloud.GetMetadata().GetAvailabilityZone()
 			if ip, ok := ipMap[nodeAZ]; ok {
+				resolvedMountTargetIP = ip
 				mountOptions = append(mountOptions, MountTargetIp+"="+ip)
 			} else {
 				// No mount target in this node's AZ; pick any available one as fallback.
 				for az, ip := range ipMap {
 					klog.Warningf("No mount target IP for node AZ %s, falling back to AZ %s (IP %s)", nodeAZ, az, ip)
+					resolvedMountTargetIP = ip
 					mountOptions = append(mountOptions, MountTargetIp+"="+ip)
 					break
 				}
@@ -272,6 +302,26 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	}
 	klog.V(5).Infof("NodePublishVolume: %s was mounted", target)
 
+	d.writeEfsMeta(target, efsVolumeMeta{
+		SchemaVersion: 1,
+		Target:        target,
+		FsType:        fsType.String(),
+		VolumeHandle: efsVolumeHandleMeta{
+			FileSystemID:  fsid,
+			ExportPath:    subpath,
+			AccessPointID: apid,
+		},
+		VolumeContext: efsVolumeContextMeta{
+			EncryptInTransit: encryptInTransit,
+			MountTargetIP:    resolvedMountTargetIP,
+			CrossAccount:     crossAccountDNSEnabled,
+		},
+		MountFlags: mountOptions,
+		ReadOnly:   req.GetReadonly(),
+		Iam: hasOption(mountOptions, "iam") ||
+			fsType == util.FileSystemTypeS3Files,
+	})
+
 	//Increment volume Id counter
 	if d.volMetricsOptIn {
 		volumeIdCounterMu.Lock()
@@ -315,6 +365,7 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 		// reply 0 OK.
 		if refCount == 0 {
 			klog.V(5).Infof("NodeUnpublishVolume: %s target not mounted", target)
+			d.removeEfsMeta(target)
 			return &csi.NodeUnpublishVolumeResponse{}, nil
 		}
 
@@ -326,6 +377,8 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 	}
 
 	klog.V(5).Infof("NodeUnpublishVolume: %s unmounted", target)
+
+	d.removeEfsMeta(target)
 
 	//TODO: If `du` is running on a volume, unmount waits for it to complete. We should stop `du` on unmount in the future for NodeUnpublish
 	//Decrement Volume ID counter and evict cache if counter is 0.
@@ -600,6 +653,43 @@ func hasOption(options []string, opt string) bool {
 		}
 	}
 	return false
+}
+
+// efsMetaPath hashes the cleaned target so consumers can derive it from mountinfo.
+func (d *Driver) efsMetaPath(target string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(target)))
+	return filepath.Join(d.metaDir, hex.EncodeToString(sum[:])+".json")
+}
+
+func (d *Driver) removeEfsMeta(target string) {
+	metaPath := d.efsMetaPath(target)
+	if err := os.Remove(metaPath); err != nil && !os.IsNotExist(err) {
+		klog.Warningf("NodeUnpublishVolume: remove %s: %v", metaPath, err)
+	}
+}
+
+// writeEfsMeta writes metadata atomically without failing a successful mount.
+func (d *Driver) writeEfsMeta(target string, meta efsVolumeMeta) {
+	metaPath := d.efsMetaPath(target)
+	tmpPath := metaPath + ".tmp"
+
+	if err := os.MkdirAll(d.metaDir, 0700); err != nil {
+		klog.Warningf("NodePublishVolume: mkdir %s: %v", d.metaDir, err)
+		return
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		klog.Warningf("NodePublishVolume: marshal %s: %v", metaPath, err)
+		return
+	}
+	if err := os.WriteFile(tmpPath, b, 0600); err != nil {
+		klog.Warningf("NodePublishVolume: write %s: %v", tmpPath, err)
+		return
+	}
+	if err := os.Rename(tmpPath, metaPath); err != nil {
+		klog.Warningf("NodePublishVolume: rename %s: %v", metaPath, err)
+		_ = os.Remove(tmpPath)
+	}
 }
 
 func isValidFileSystemId(filesystemId string) bool {
