@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -44,9 +45,14 @@ var (
 		csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
 		csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
 	}
-	volumeIdCounter  = make(map[string]int)
-	supportedFSTypes = []string{util.FileSystemTypeEFS.String(), util.FileSystemTypeS3Files.String(), ""}
-	hexSuffixRegex   = regexp.MustCompile(`^[0-9a-f]{8,40}$`)
+	volumeIdCounter = make(map[string]int)
+	// volumeIdCounterMu guards concurrent access to volumeIdCounter, which is
+	// read/written/deleted from NodePublishVolume and NodeUnpublishVolume.
+	// Those handlers run concurrently as independent goroutines per gRPC
+	// call, so the map must be protected against concurrent access.
+	volumeIdCounterMu sync.Mutex
+	supportedFSTypes  = []string{util.FileSystemTypeEFS.String(), util.FileSystemTypeS3Files.String(), ""}
+	hexSuffixRegex    = regexp.MustCompile(`^[0-9a-f]{8,40}$`)
 )
 
 const (
@@ -267,11 +273,13 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 
 	//Increment volume Id counter
 	if d.volMetricsOptIn {
+		volumeIdCounterMu.Lock()
 		if value, ok := volumeIdCounter[req.GetVolumeId()]; ok {
 			volumeIdCounter[req.GetVolumeId()] = value + 1
 		} else {
 			volumeIdCounter[req.GetVolumeId()] = 1
 		}
+		volumeIdCounterMu.Unlock()
 	}
 
 	return &csi.NodePublishVolumeResponse{}, nil
@@ -321,6 +329,7 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 	//TODO: If `du` is running on a volume, unmount waits for it to complete. We should stop `du` on unmount in the future for NodeUnpublish
 	//Decrement Volume ID counter and evict cache if counter is 0.
 	if d.volMetricsOptIn {
+		volumeIdCounterMu.Lock()
 		if value, ok := volumeIdCounter[req.GetVolumeId()]; ok {
 			value -= 1
 			if value < 1 {
@@ -331,6 +340,7 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 				volumeIdCounter[req.GetVolumeId()] = value
 			}
 		}
+		volumeIdCounterMu.Unlock()
 	}
 
 	return &csi.NodeUnpublishVolumeResponse{}, nil

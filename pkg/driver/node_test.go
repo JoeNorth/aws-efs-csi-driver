@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -951,6 +952,70 @@ func TestNodeUnpublishVolume(t *testing.T) {
 			testResult(t, "NodeUnpublishVolume", ret, err, tc.expectError)
 		})
 	}
+}
+
+// TestNodePublishUnpublishVolumeConcurrent exercises concurrent
+// NodePublishVolume and NodeUnpublishVolume calls (with volMetricsOptIn
+// enabled) to guard against concurrent map read/write panics on the
+// package-level volumeIdCounter map. Run with `go test -race` to verify
+// there is no data race.
+func TestNodePublishUnpublishVolumeConcurrent(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+
+	mockMounter, driver, ctx := setup(mockCtrl, NewVolStatter(), true, UnsetMaxInflightMountCounts)
+
+	stdVolCap := &csi.VolumeCapability{
+		AccessType: &csi.VolumeCapability_Mount{
+			Mount: &csi.VolumeCapability_MountVolume{},
+		},
+		AccessMode: &csi.VolumeCapability_AccessMode{
+			Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+		},
+	}
+
+	// The mounter calls happen for every goroutine with varying volume/target
+	// paths, so allow them to be called any number of times with any args.
+	mockMounter.EXPECT().MakeDir(gomock.Any()).Return(nil).AnyTimes()
+	mockMounter.EXPECT().Mount(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	mockMounter.EXPECT().GetDeviceName(gomock.Any()).Return("", 1, nil).AnyTimes()
+	mockMounter.EXPECT().Unmount(gomock.Any()).Return(nil).AnyTimes()
+
+	const numGoroutines = 50
+	const numVolumes = 5
+
+	var wg sync.WaitGroup
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			// Reuse a small set of volume IDs across goroutines so that
+			// concurrent Publish/Unpublish calls for the *same* volume ID
+			// exercise the shared volumeIdCounter map entry as well.
+			volID := fmt.Sprintf("fs-abcd%04d", i%numVolumes)
+			target := fmt.Sprintf("/target/path/%d", i)
+
+			publishReq := &csi.NodePublishVolumeRequest{
+				VolumeId:         volID,
+				VolumeCapability: stdVolCap,
+				TargetPath:       target,
+			}
+			if _, err := driver.NodePublishVolume(ctx, publishReq); err != nil {
+				t.Errorf("NodePublishVolume failed: %v", err)
+				return
+			}
+
+			unpublishReq := &csi.NodeUnpublishVolumeRequest{
+				VolumeId:   volID,
+				TargetPath: target,
+			}
+			if _, err := driver.NodeUnpublishVolume(ctx, unpublishReq); err != nil {
+				t.Errorf("NodeUnpublishVolume failed: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestNodeGetVolumeStats(t *testing.T) {
