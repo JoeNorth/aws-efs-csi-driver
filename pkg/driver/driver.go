@@ -141,9 +141,14 @@ func (d *Driver) Run() error {
 
 	// Remove taint from node to indicate driver startup success
 	// This is done at the last possible moment to prevent race conditions or false positive removals
-	go tryRemoveNotReadyTaintUntilSucceed(time.Second, func() error {
-		return removeNotReadyTaint(cloud.DefaultKubernetesAPIClient)
-	})
+	go tryRemoveNotReadyTaintUntilSucceed(2*time.Second, 1*time.Second, 10*time.Second,
+		func() error {
+			return checkDriverRegistration(cloud.DefaultKubernetesAPIClient, driverName)
+		},
+		func() error {
+			return removeNotReadyTaint(cloud.DefaultKubernetesAPIClient)
+		},
+	)
 
 	klog.Infof("Listening for connections on address: %#v", listener.Addr())
 	return d.srv.Serve(listener)

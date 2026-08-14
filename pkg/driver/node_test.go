@@ -32,6 +32,9 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/kubernetes-sigs/aws-efs-csi-driver/pkg/driver/mocks"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -1351,29 +1354,86 @@ func getNodeMock(mockCtl *gomock.Controller, nodeName string, returnNode *corev1
 
 func TestTryRemoveNotReadyTaintUntilSucceed(t *testing.T) {
 	{
+		// Registration always passes, taint removal fails then succeeds
 		i := 0
-		tryRemoveNotReadyTaintUntilSucceed(time.Second, func() error {
-			i++
-			if i < 3 {
-				return errors.New("test")
-			}
-
-			return nil
-		})
+		tryRemoveNotReadyTaintUntilSucceed(0, time.Millisecond, 10*time.Millisecond,
+			func() error { return nil },
+			func() error {
+				i++
+				if i < 3 {
+					return errors.New("test")
+				}
+				return nil
+			})
 
 		if i != 3 {
-			t.Fatalf("unexpected result")
+			t.Fatalf("unexpected result: got %d, want 3", i)
 		}
 	}
 	{
+		// Registration always passes, taint removal succeeds immediately
 		i := 0
-		tryRemoveNotReadyTaintUntilSucceed(time.Second, func() error {
-			i++
-			return nil
-		})
+		tryRemoveNotReadyTaintUntilSucceed(0, time.Millisecond, 10*time.Millisecond,
+			func() error { return nil },
+			func() error {
+				i++
+				return nil
+			})
 
 		if i != 1 {
-			t.Fatalf("unexpected result")
+			t.Fatalf("unexpected result: got %d, want 1", i)
+		}
+	}
+	{
+		// Registration fails N times then succeeds, taint removal called once and succeeds
+		regCount := 0
+		removeCount := 0
+		tryRemoveNotReadyTaintUntilSucceed(0, time.Millisecond, 10*time.Millisecond,
+			func() error {
+				regCount++
+				if regCount < 4 {
+					return errors.New("not registered yet")
+				}
+				return nil
+			},
+			func() error {
+				removeCount++
+				return nil
+			})
+
+		if regCount != 4 {
+			t.Fatalf("unexpected registration check count: got %d, want 4", regCount)
+		}
+		if removeCount != 1 {
+			t.Fatalf("unexpected remove count: got %d, want 1", removeCount)
+		}
+	}
+	{
+		// Registration fails then succeeds, taint removal fails then succeeds
+		regCount := 0
+		removeCount := 0
+		tryRemoveNotReadyTaintUntilSucceed(0, time.Millisecond, 10*time.Millisecond,
+			func() error {
+				regCount++
+				if regCount < 3 {
+					return errors.New("not registered yet")
+				}
+				return nil
+			},
+			func() error {
+				removeCount++
+				if removeCount < 2 {
+					return errors.New("patch conflict")
+				}
+				return nil
+			})
+
+		// Registration should be called: 2 fails + 1 success for first remove attempt + 1 success for second remove attempt = 4
+		if regCount < 3 {
+			t.Fatalf("unexpected registration check count: got %d, want >= 3", regCount)
+		}
+		if removeCount != 2 {
+			t.Fatalf("unexpected remove count: got %d, want 2", removeCount)
 		}
 	}
 }
@@ -1620,6 +1680,187 @@ func TestNodePublishVolumeMountTargetIpMap(t *testing.T) {
 				}
 				if ret == nil {
 					t.Fatal("Expected non-nil return value")
+				}
+			}
+		})
+	}
+}
+
+func TestCheckDriverRegistration(t *testing.T) {
+	nodeName := "test-node-123"
+	testDriverName := "efs.csi.aws.com"
+	int32Val := int32(10)
+
+	testCases := []struct {
+		name      string
+		setup     func(t *testing.T, mockCtl *gomock.Controller) func() (kubernetes.Interface, error)
+		expectErr bool
+		errSubstr string
+	}{
+		{
+			name: "CSI_NODE_NAME not set",
+			setup: func(t *testing.T, mockCtl *gomock.Controller) func() (kubernetes.Interface, error) {
+				t.Setenv("CSI_NODE_NAME", "")
+				return func() (kubernetes.Interface, error) {
+					t.Fatalf("Unexpected call to k8s client getter")
+					return nil, nil
+				}
+			},
+			expectErr: true,
+			errSubstr: "CSI_NODE_NAME not set",
+		},
+		{
+			name: "k8s client creation fails",
+			setup: func(t *testing.T, mockCtl *gomock.Controller) func() (kubernetes.Interface, error) {
+				t.Setenv("CSI_NODE_NAME", nodeName)
+				return func() (kubernetes.Interface, error) {
+					return nil, fmt.Errorf("failed to create client")
+				}
+			},
+			expectErr: true,
+			errSubstr: "failed to create kubernetes client",
+		},
+		{
+			name: "CSINode Get returns not-found",
+			setup: func(t *testing.T, mockCtl *gomock.Controller) func() (kubernetes.Interface, error) {
+				t.Setenv("CSI_NODE_NAME", nodeName)
+				mockClient := mocks.NewMockKubernetesClient(mockCtl)
+				mockStorageV1 := mocks.NewMockStorageV1Interface(mockCtl)
+				mockCSINode := mocks.NewMockCSINodeInterface(mockCtl)
+
+				mockClient.EXPECT().StorageV1().Return(mockStorageV1).MinTimes(1)
+				mockStorageV1.EXPECT().CSINodes().Return(mockCSINode).MinTimes(1)
+				mockCSINode.EXPECT().Get(gomock.Any(), gomock.Eq(nodeName), gomock.Any()).Return(nil,
+					apierrors.NewNotFound(schema.GroupResource{Group: "storage.k8s.io", Resource: "csinodes"}, nodeName))
+
+				return func() (kubernetes.Interface, error) {
+					return mockClient, nil
+				}
+			},
+			expectErr: true,
+			errSubstr: "failed to get CSINode",
+		},
+		{
+			name: "CSINode Get returns forbidden",
+			setup: func(t *testing.T, mockCtl *gomock.Controller) func() (kubernetes.Interface, error) {
+				t.Setenv("CSI_NODE_NAME", nodeName)
+				mockClient := mocks.NewMockKubernetesClient(mockCtl)
+				mockStorageV1 := mocks.NewMockStorageV1Interface(mockCtl)
+				mockCSINode := mocks.NewMockCSINodeInterface(mockCtl)
+
+				mockClient.EXPECT().StorageV1().Return(mockStorageV1).MinTimes(1)
+				mockStorageV1.EXPECT().CSINodes().Return(mockCSINode).MinTimes(1)
+				mockCSINode.EXPECT().Get(gomock.Any(), gomock.Eq(nodeName), gomock.Any()).Return(nil,
+					apierrors.NewForbidden(schema.GroupResource{Group: "storage.k8s.io", Resource: "csinodes"}, nodeName, fmt.Errorf("forbidden")))
+
+				return func() (kubernetes.Interface, error) {
+					return mockClient, nil
+				}
+			},
+			expectErr: true,
+			errSubstr: "failed to get CSINode",
+		},
+		{
+			name: "CSINode exists but driver not listed",
+			setup: func(t *testing.T, mockCtl *gomock.Controller) func() (kubernetes.Interface, error) {
+				t.Setenv("CSI_NODE_NAME", nodeName)
+				mockClient := mocks.NewMockKubernetesClient(mockCtl)
+				mockStorageV1 := mocks.NewMockStorageV1Interface(mockCtl)
+				mockCSINode := mocks.NewMockCSINodeInterface(mockCtl)
+
+				mockClient.EXPECT().StorageV1().Return(mockStorageV1).MinTimes(1)
+				mockStorageV1.EXPECT().CSINodes().Return(mockCSINode).MinTimes(1)
+				mockCSINode.EXPECT().Get(gomock.Any(), gomock.Eq(nodeName), gomock.Any()).Return(&storagev1.CSINode{
+					Spec: storagev1.CSINodeSpec{
+						Drivers: []storagev1.CSINodeDriver{
+							{Name: "some.other.driver"},
+						},
+					},
+				}, nil)
+
+				return func() (kubernetes.Interface, error) {
+					return mockClient, nil
+				}
+			},
+			expectErr: true,
+			errSubstr: "not yet listed in CSINode",
+		},
+		{
+			name: "CSINode exists, driver listed, Allocatable nil",
+			setup: func(t *testing.T, mockCtl *gomock.Controller) func() (kubernetes.Interface, error) {
+				t.Setenv("CSI_NODE_NAME", nodeName)
+				mockClient := mocks.NewMockKubernetesClient(mockCtl)
+				mockStorageV1 := mocks.NewMockStorageV1Interface(mockCtl)
+				mockCSINode := mocks.NewMockCSINodeInterface(mockCtl)
+
+				mockClient.EXPECT().StorageV1().Return(mockStorageV1).MinTimes(1)
+				mockStorageV1.EXPECT().CSINodes().Return(mockCSINode).MinTimes(1)
+				mockCSINode.EXPECT().Get(gomock.Any(), gomock.Eq(nodeName), gomock.Any()).Return(&storagev1.CSINode{
+					Spec: storagev1.CSINodeSpec{
+						Drivers: []storagev1.CSINodeDriver{
+							{
+								Name:        testDriverName,
+								Allocatable: nil,
+							},
+						},
+					},
+				}, nil)
+
+				return func() (kubernetes.Interface, error) {
+					return mockClient, nil
+				}
+			},
+			expectErr: true,
+			errSubstr: "Allocatable not yet set",
+		},
+		{
+			name: "CSINode exists, driver listed, Allocatable set - success",
+			setup: func(t *testing.T, mockCtl *gomock.Controller) func() (kubernetes.Interface, error) {
+				t.Setenv("CSI_NODE_NAME", nodeName)
+				mockClient := mocks.NewMockKubernetesClient(mockCtl)
+				mockStorageV1 := mocks.NewMockStorageV1Interface(mockCtl)
+				mockCSINode := mocks.NewMockCSINodeInterface(mockCtl)
+
+				mockClient.EXPECT().StorageV1().Return(mockStorageV1).MinTimes(1)
+				mockStorageV1.EXPECT().CSINodes().Return(mockCSINode).MinTimes(1)
+				mockCSINode.EXPECT().Get(gomock.Any(), gomock.Eq(nodeName), gomock.Any()).Return(&storagev1.CSINode{
+					Spec: storagev1.CSINodeSpec{
+						Drivers: []storagev1.CSINodeDriver{
+							{
+								Name: testDriverName,
+								Allocatable: &storagev1.VolumeNodeResources{
+									Count: &int32Val,
+								},
+							},
+						},
+					},
+				}, nil)
+
+				return func() (kubernetes.Interface, error) {
+					return mockClient, nil
+				}
+			},
+			expectErr: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockCtl := gomock.NewController(t)
+			defer mockCtl.Finish()
+
+			k8sClientGetter := tc.setup(t, mockCtl)
+			err := checkDriverRegistration(k8sClientGetter, testDriverName)
+			if tc.expectErr {
+				if err == nil {
+					t.Fatalf("Expected error containing %q, got nil", tc.errSubstr)
+				}
+				if !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Fatalf("Expected error containing %q, got: %v", tc.errSubstr, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Expected nil error, got: %v", err)
 				}
 			}
 		})
