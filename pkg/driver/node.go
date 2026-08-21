@@ -57,6 +57,21 @@ var (
 	volumeIdCounterMu sync.Mutex
 	supportedFSTypes  = []string{util.FileSystemTypeEFS.String(), util.FileSystemTypeS3Files.String(), ""}
 	hexSuffixRegex    = regexp.MustCompile(`^[0-9a-f]{8,40}$`)
+	// dnsFileSystemIdRegex matches the DNS-name form of a file system ID used in
+	// static PV volumeHandles. It validates the structure of the name rather than
+	// enumerating known domains, covering:
+	//   EFS bare:        fs-9919e11b.efs.us-east-1.amazonaws.com
+	//   EFS AZ-prefixed: us-east-1a.fs-9919e11b.efs.us-east-1.amazonaws.com
+	//   S3 Files:        use1-az1.fs-0123456abcdef0189.s3files.us-east-1.on.aws
+	// An optional single leading AZ label may precede the strictly-validated
+	// fs-[0-9a-f]{8,40} id label. The surrounding DNS labels are matched
+	// case-insensitively (DNS names are case-insensitive), but the fs-<hex> id
+	// label itself is kept strictly lowercase hex so that the DNS branch does not
+	// accept ids (e.g. fs-ABCDEF12) that the bare-id branch would reject. The
+	// remaining domain is constrained to the DNS charset ([a-zA-Z0-9.-]) only (no
+	// commas, spaces, slashes, or '='), so a DNS-name volumeHandle cannot be used
+	// to inject additional mount options into the mount source passed to efs-utils.
+	dnsFileSystemIdRegex = regexp.MustCompile(`^([a-zA-Z0-9][a-zA-Z0-9-]*\.)?fs-[0-9a-f]{8,40}\.[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$`)
 )
 
 const (
@@ -563,7 +578,9 @@ func (d *Driver) validateFStype(volCaps []*csi.VolumeCapability) error {
 //   - Examples: `fs-abcd1234::`, `fs-abcd1234:`, `fs-abcd1234`, `fs-abcd1234:/path:fsap-xyz123`
 //
 // COMMON RULES:
-//   - The `{fileSystemID}` is required, and expected to be of the form `fs-...`
+//   - The `{fileSystemID}` is required. It may be either the bare id `fs-[0-9a-f]{8,40}`,
+//     or the mount-target DNS name form (e.g. `fs-abcd1234.efs.<region>.amazonaws.com`,
+//     optionally with a leading AZ label such as `us-east-1a.fs-abcd1234.efs.<region>.amazonaws.com`)
 //   - The `{mountPath}` and `{accessPointID}` are optional -- they may be empty or omitted entirely
 //   - The `{mountPath}`, if specified, is not required to be absolute
 //   - The `{accessPointID}` is expected to be of the form `fsap-...`
@@ -595,7 +612,7 @@ func parseVolumeId(volumeId string) (fsid, subpath, apid string, fsType util.Fil
 		// Validate and extract fsid
 		fsid = tokens[1]
 		if !isValidFileSystemId(fsid) {
-			err = status.Errorf(codes.InvalidArgument, "volume ID '%s' is invalid: Expected a file system ID of the form 'fs-[0-9a-f]{8,40}'", volumeId)
+			err = status.Errorf(codes.InvalidArgument, "volume ID '%s' is invalid: Expected a file system ID of the form 'fs-[0-9a-f]{8,40}' or a mount-target DNS name (e.g. 'fs-abcd1234.efs.<region>.amazonaws.com')", volumeId)
 			return
 		}
 
@@ -623,7 +640,7 @@ func parseVolumeId(volumeId string) (fsid, subpath, apid string, fsType util.Fil
 		// Extract fsid
 		fsid = tokens[0]
 		if !isValidFileSystemId(fsid) {
-			err = status.Errorf(codes.InvalidArgument, "volume ID '%s' is invalid: Expected a file system ID of the form 'fs-[0-9a-f]{8,40}'", volumeId)
+			err = status.Errorf(codes.InvalidArgument, "volume ID '%s' is invalid: Expected a file system ID of the form 'fs-[0-9a-f]{8,40}' or a mount-target DNS name (e.g. 'fs-abcd1234.efs.<region>.amazonaws.com')", volumeId)
 			return
 		}
 
@@ -693,7 +710,15 @@ func (d *Driver) writeEfsMeta(target string, meta efsVolumeMeta) {
 }
 
 func isValidFileSystemId(filesystemId string) bool {
-	return strings.HasPrefix(filesystemId, "fs-") && hexSuffixRegex.MatchString(filesystemId[3:])
+	// Accept either the bare id (fs-[0-9a-f]{8,40}) or the DNS-name form used in
+	// static PV volumeHandles (EFS bare/AZ-prefixed and S3 Files). The DNS-name
+	// form is passed through unchanged to efs-utils. Both forms keep the fs-<hex>
+	// id portion strictly validated and constrain the DNS charset to prevent
+	// mount-option injection.
+	if strings.HasPrefix(filesystemId, "fs-") && hexSuffixRegex.MatchString(filesystemId[3:]) {
+		return true
+	}
+	return dnsFileSystemIdRegex.MatchString(filesystemId)
 }
 
 func isValidAccessPointId(accesspointId string) bool {
