@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
@@ -608,6 +609,38 @@ type JSONPatch struct {
 
 // removeNotReadyTaint removes the taint efs.csi.aws.com/agent-not-ready from the local node
 // This taint can be optionally applied by users to prevent startup race conditions such as
+// checkDriverRegistration verifies that the driver is registered in the CSINode object
+// by checking that the CSINode exists, lists our driver name, and has Allocatable set.
+// Returns nil when registered, error otherwise.
+func checkDriverRegistration(k8sClient cloud.KubernetesAPIClient, driverName string) error {
+	nodeName := os.Getenv("CSI_NODE_NAME")
+	if nodeName == "" {
+		return fmt.Errorf("CSI_NODE_NAME not set")
+	}
+	clientset, err := k8sClient()
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes client: %w", err)
+	}
+	csiNode, err := clientset.StorageV1().CSINodes().Get(context.Background(), nodeName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
+			klog.Warningf("Cannot check CSINode registration due to insufficient RBAC permissions (need 'get' on 'csinodes.storage.k8s.io'). "+
+				"The startup taint %s will NOT be removed until permissions are granted. "+
+				"Please update the driver's ClusterRole to include this permission.", AgentNotReadyNodeTaintKey)
+		}
+		return fmt.Errorf("failed to get CSINode: %w", err)
+	}
+	for _, driver := range csiNode.Spec.Drivers {
+		if driver.Name == driverName {
+			if driver.Allocatable != nil {
+				return nil // Driver registered with allocatable set
+			}
+			return fmt.Errorf("driver %s found in CSINode but Allocatable not yet set", driverName)
+		}
+	}
+	return fmt.Errorf("driver %s not yet listed in CSINode", driverName)
+}
+
 // https://github.com/kubernetes/kubernetes/issues/95911
 func removeNotReadyTaint(k8sClient cloud.KubernetesAPIClient) error {
 	if os.Getenv("DISABLE_TAINT_WATCHER") != "" {
@@ -682,15 +715,27 @@ func removeNotReadyTaint(k8sClient cloud.KubernetesAPIClient) error {
 }
 
 // remove taint may fail, this keeps retrying until it succeeds, make sure the taint will eventually be removed
-func tryRemoveNotReadyTaintUntilSucceed(interval time.Duration, removeFn func() error) {
+func tryRemoveNotReadyTaintUntilSucceed(initialDelay time.Duration, interval time.Duration, maxInterval time.Duration, registrationCheckFn func() error, removeFn func() error) {
+	time.Sleep(initialDelay)
+	currentInterval := interval
 	for {
+		if err := registrationCheckFn(); err != nil {
+			klog.V(4).InfoS("Waiting for driver registration before removing taint", "reason", err)
+			time.Sleep(currentInterval)
+			if currentInterval < maxInterval {
+				currentInterval = currentInterval * 2
+				if currentInterval > maxInterval {
+					currentInterval = maxInterval
+				}
+			}
+			continue
+		}
 		err := removeFn()
 		if err == nil {
 			return
 		}
-
 		klog.ErrorS(err, "Unexpected failure when attempting to remove node taint(s)")
-		time.Sleep(interval)
+		time.Sleep(currentInterval)
 	}
 }
 
