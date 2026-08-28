@@ -57,6 +57,8 @@ type Driver struct {
 	volumeAttachLimit        int64
 	forceUnmountAfterTimeout bool
 	unmountTimeout           time.Duration
+	// metaDir is bind-mounted to /var/lib/kubelet/plugins/efs.csi.aws.com/mounts on the host.
+	metaDir string
 }
 
 func NewDriver(options *Options, efsUtilsCfgPath string) *Driver {
@@ -87,6 +89,7 @@ func NewDriver(options *Options, efsUtilsCfgPath string) *Driver {
 		volumeAttachLimit:        getVolumeAttachLimit(*options.VolumeAttachLimitOptIn, *options.VolumeAttachLimit),
 		forceUnmountAfterTimeout: *options.ForceUnmountAfterTimeout,
 		unmountTimeout:           *options.UnmountTimeout,
+		metaDir:                  "/csi/mounts",
 	}
 }
 

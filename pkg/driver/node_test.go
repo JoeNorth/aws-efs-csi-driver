@@ -18,10 +18,12 @@ package driver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -1930,4 +1932,363 @@ func TestCheckDriverRegistration(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEfsMetaFile(t *testing.T) {
+	stdVolCap := &csi.VolumeCapability{
+		AccessType: &csi.VolumeCapability_Mount{
+			Mount: &csi.VolumeCapability_MountVolume{},
+		},
+		AccessMode: &csi.VolumeCapability_AccessMode{
+			Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+		},
+	}
+
+	newDriver := func(t *testing.T, mounter Mounter) *Driver {
+		t.Helper()
+		return &Driver{
+			endpoint:             "endpoint",
+			nodeID:               "nodeID",
+			mounter:              mounter,
+			volMetricsOptIn:      true,
+			volStatter:           NewVolStatter(),
+			nodeCaps:             SetNodeCapOptInFeatures(true),
+			inFlightMountTracker: NewInFlightMountTracker(UnsetMaxInflightMountCounts),
+			metaDir:              filepath.Join(t.TempDir(), "mounts"),
+		}
+	}
+
+	setupPublish := func(t *testing.T) (driver *Driver, ctrl *gomock.Controller, target string) {
+		t.Helper()
+		t.Setenv("CSI_NODE_MEMORY_LIMIT", strconv.Itoa(minMemoryInBytesToEnableS3ReadCache*2))
+		ctrl = gomock.NewController(t)
+		target = filepath.Join(t.TempDir(), "mount")
+
+		mockMounter := mocks.NewMockMounter(ctrl)
+		mockMounter.EXPECT().MakeDir(gomock.Eq(target)).Return(nil)
+		mockMounter.EXPECT().Mount(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+		return newDriver(t, mockMounter), ctrl, target
+	}
+
+	publishReq := func(target string) *csi.NodePublishVolumeRequest {
+		return &csi.NodePublishVolumeRequest{
+			VolumeId:         volumeId,
+			VolumeCapability: stdVolCap,
+			TargetPath:       target,
+		}
+	}
+
+	publish := func(t *testing.T, driver *Driver, req *csi.NodePublishVolumeRequest) {
+		t.Helper()
+		if _, err := driver.NodePublishVolume(context.Background(), req); err != nil {
+			t.Fatalf("NodePublishVolume failed: %v", err)
+		}
+	}
+
+	readMeta := func(t *testing.T, driver *Driver, target string) efsVolumeMeta {
+		t.Helper()
+		metaPath := driver.efsMetaPath(target)
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			t.Fatalf("expected meta file %s to exist: %v", metaPath, err)
+		}
+		var meta efsVolumeMeta
+		if err := json.Unmarshal(data, &meta); err != nil {
+			t.Fatalf("failed to parse meta file: %v", err)
+		}
+		return meta
+	}
+
+	seedMeta := func(t *testing.T, driver *Driver, target string) {
+		t.Helper()
+		metaPath := driver.efsMetaPath(target)
+		if err := os.MkdirAll(filepath.Dir(metaPath), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metaPath, []byte(`{"schemaVersion":1}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("publish writes meta file with all fields", func(t *testing.T) {
+		driver, _, target := setupPublish(t)
+
+		req := publishReq(target)
+		req.VolumeId = "fs-abc12345:/data:fsap-deadbeef"
+		req.Readonly = true
+		req.VolumeContext = map[string]string{"mounttargetip": "10.0.0.5"}
+		publish(t, driver, req)
+
+		meta := readMeta(t, driver, target)
+		if meta.SchemaVersion != 1 {
+			t.Errorf("schemaVersion = %d, want 1", meta.SchemaVersion)
+		}
+		if meta.Target != target {
+			t.Errorf("target = %q, want %q", meta.Target, target)
+		}
+		if meta.FsType != "efs" {
+			t.Errorf("fsType = %q, want %q", meta.FsType, "efs")
+		}
+		if meta.VolumeHandle.FileSystemID != "fs-abc12345" {
+			t.Errorf("volumeHandle.fileSystemId = %q, want %q", meta.VolumeHandle.FileSystemID, "fs-abc12345")
+		}
+		if meta.VolumeHandle.ExportPath != "/data" {
+			t.Errorf("volumeHandle.exportPath = %q, want %q", meta.VolumeHandle.ExportPath, "/data")
+		}
+		if meta.VolumeHandle.AccessPointID != "fsap-deadbeef" {
+			t.Errorf("volumeHandle.accessPointId = %q, want %q", meta.VolumeHandle.AccessPointID, "fsap-deadbeef")
+		}
+		if meta.VolumeContext.MountTargetIP != "10.0.0.5" {
+			t.Errorf("volumeContext.mountTargetIp = %q, want %q", meta.VolumeContext.MountTargetIP, "10.0.0.5")
+		}
+		if !meta.VolumeContext.EncryptInTransit {
+			t.Error("volumeContext.encryptInTransit = false, want true")
+		}
+		if !meta.ReadOnly {
+			t.Error("readOnly = false, want true")
+		}
+		if !hasOption(meta.MountFlags, "tls") ||
+			!hasOption(meta.MountFlags, "accesspoint=fsap-deadbeef") {
+			t.Errorf("mountFlags missing expected entries: %v", meta.MountFlags)
+		}
+	})
+
+	t.Run("publish without mounttargetip omits field", func(t *testing.T) {
+		driver, _, target := setupPublish(t)
+		publish(t, driver, publishReq(target))
+
+		data, err := os.ReadFile(driver.efsMetaPath(target))
+		if err != nil {
+			t.Fatalf("expected meta file to exist: %v", err)
+		}
+		var raw struct {
+			VolumeContext map[string]interface{} `json:"volumeContext"`
+		}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("failed to parse meta: %v", err)
+		}
+		if _, ok := raw.VolumeContext["mountTargetIp"]; ok {
+			t.Error("volumeContext.mountTargetIp should be omitted when no IP was resolved")
+		}
+	})
+
+	t.Run("publish with trailing slash writes metadata outside the mount target", func(t *testing.T) {
+		t.Setenv("CSI_NODE_MEMORY_LIMIT", strconv.Itoa(minMemoryInBytesToEnableS3ReadCache*2))
+		target := filepath.Join(t.TempDir(), "mount") + string(os.PathSeparator)
+		if err := os.MkdirAll(filepath.Clean(target), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		mockMounter := mocks.NewMockMounter(gomock.NewController(t))
+		mockMounter.EXPECT().MakeDir(target).Return(nil)
+		mockMounter.EXPECT().Mount(gomock.Any(), target, gomock.Any(), gomock.Any()).Return(nil)
+
+		driver := newDriver(t, mockMounter)
+		publish(t, driver, publishReq(target))
+
+		readMeta(t, driver, target)
+
+		entries, err := os.ReadDir(filepath.Clean(target))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("mount target should be empty, found %d entries", len(entries))
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		refCount int
+		seedMeta bool
+	}{
+		{name: "unpublish removes meta file", refCount: 1, seedMeta: true},
+		{name: "unpublish tolerates missing meta file", refCount: 1},
+		{name: "unpublish removes metadata when target is already unmounted", seedMeta: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), "mount")
+			mockMounter := mocks.NewMockMounter(gomock.NewController(t))
+			mockMounter.EXPECT().GetDeviceName(target).Return("", tc.refCount, nil)
+			if tc.refCount > 0 {
+				mockMounter.EXPECT().Unmount(target).Return(nil)
+			}
+
+			driver := newDriver(t, mockMounter)
+			metaPath := driver.efsMetaPath(target)
+			if tc.seedMeta {
+				seedMeta(t, driver, target)
+			}
+
+			req := &csi.NodeUnpublishVolumeRequest{VolumeId: volumeId, TargetPath: target}
+			if _, err := driver.NodeUnpublishVolume(context.Background(), req); err != nil {
+				t.Fatalf("NodeUnpublishVolume failed: %v", err)
+			}
+			if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
+				t.Errorf("expected meta file to be absent after unpublish, got err=%v", err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name   string
+		nodeAZ string
+		ipMap  string
+		wantIP string
+	}{
+		{
+			name:   "publish with mounttargetipmap writes resolved IP for node AZ",
+			nodeAZ: "us-west-2b",
+			ipMap:  `{"us-west-2a":"10.0.1.1","us-west-2b":"10.0.2.1"}`,
+			wantIP: "10.0.2.1",
+		},
+		{
+			name:   "publish with mounttargetipmap falls back to any IP when node AZ absent",
+			nodeAZ: "us-west-2c",
+			ipMap:  `{"us-west-2a":"10.0.1.1"}`,
+			wantIP: "10.0.1.1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			driver, ctrl, target := setupPublish(t)
+			mockCloud := mocks.NewMockCloud(ctrl)
+			mockCloud.EXPECT().GetMetadata().Return(&mockMetadata{availabilityZone: tc.nodeAZ}).AnyTimes()
+			driver.cloud = mockCloud
+
+			req := publishReq(target)
+			req.VolumeContext = map[string]string{"mounttargetipmap": tc.ipMap}
+			publish(t, driver, req)
+
+			if got := readMeta(t, driver, target).VolumeContext.MountTargetIP; got != tc.wantIP {
+				t.Errorf("volumeContext.mountTargetIp = %q, want %q", got, tc.wantIP)
+			}
+		})
+	}
+
+	t.Run("publish with crossaccount writes crossAccount field", func(t *testing.T) {
+		driver, _, target := setupPublish(t)
+
+		req := publishReq(target)
+		req.VolumeContext = map[string]string{"crossaccount": "true"}
+		publish(t, driver, req)
+
+		if meta := readMeta(t, driver, target); !meta.VolumeContext.CrossAccount {
+			t.Error("volumeContext.crossAccount = false, want true")
+		}
+	})
+
+	for _, tc := range []struct {
+		name       string
+		volumeID   string
+		mountFlags []string
+		wantFsType string
+		wantIAM    bool
+	}{
+		{
+			name:       "publish with explicit iam records iam=true",
+			volumeID:   volumeId,
+			mountFlags: []string{"iam"},
+			wantFsType: "efs",
+			wantIAM:    true,
+		},
+		{
+			name:       "publish with S3 Files implies iam=true",
+			volumeID:   "s3files:fs-abcd1234::fsap-abcd1234",
+			wantFsType: "s3files",
+			wantIAM:    true,
+		},
+		{
+			name:       "publish with access point but no iam option records iam=false",
+			volumeID:   volumeId + "::fsap-deadbeef",
+			wantFsType: "efs",
+		},
+		{
+			name:       "publish plain EFS records iam=false",
+			volumeID:   volumeId,
+			wantFsType: "efs",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			driver, _, target := setupPublish(t)
+			req := publishReq(target)
+			req.VolumeId = tc.volumeID
+			if tc.mountFlags != nil {
+				req.VolumeCapability = &csi.VolumeCapability{
+					AccessType: &csi.VolumeCapability_Mount{
+						Mount: &csi.VolumeCapability_MountVolume{MountFlags: tc.mountFlags},
+					},
+					AccessMode: stdVolCap.AccessMode,
+				}
+			}
+			publish(t, driver, req)
+
+			meta := readMeta(t, driver, target)
+			if meta.FsType != tc.wantFsType {
+				t.Errorf("fsType = %q, want %q", meta.FsType, tc.wantFsType)
+			}
+			if meta.Iam != tc.wantIAM {
+				t.Errorf("iam = %t, want %t", meta.Iam, tc.wantIAM)
+			}
+			if tc.wantIAM && len(tc.mountFlags) > 0 && !hasOption(meta.MountFlags, "iam") {
+				t.Errorf("mountFlags missing iam: %v", meta.MountFlags)
+			}
+		})
+	}
+
+	t.Run("publish does not write meta file when mount fails", func(t *testing.T) {
+		t.Setenv("CSI_NODE_MEMORY_LIMIT", strconv.Itoa(minMemoryInBytesToEnableS3ReadCache*2))
+		target := filepath.Join(t.TempDir(), "mount")
+
+		mockMounter := mocks.NewMockMounter(gomock.NewController(t))
+		mockMounter.EXPECT().MakeDir(gomock.Eq(target)).Return(nil)
+		mockMounter.EXPECT().Mount(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(errors.New("mount boom"))
+
+		driver := newDriver(t, mockMounter)
+		if _, err := driver.NodePublishVolume(context.Background(), publishReq(target)); err == nil {
+			t.Fatal("NodePublishVolume: expected error on mount failure")
+		}
+
+		if _, err := os.Stat(driver.efsMetaPath(target)); !os.IsNotExist(err) {
+			t.Errorf("meta file should not exist after mount failure, got err=%v", err)
+		}
+	})
+
+	t.Run("publish succeeds when meta write fails", func(t *testing.T) {
+		t.Setenv("CSI_NODE_MEMORY_LIMIT", strconv.Itoa(minMemoryInBytesToEnableS3ReadCache*2))
+		target := filepath.Join(t.TempDir(), "mount")
+
+		mockMounter := mocks.NewMockMounter(gomock.NewController(t))
+		mockMounter.EXPECT().MakeDir(gomock.Eq(target)).Return(nil)
+		mockMounter.EXPECT().Mount(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+
+		driver := newDriver(t, mockMounter)
+		// Put a regular file where MkdirAll expects a parent directory. This
+		// makes MkdirAll fail with ENOTDIR for any UID (including root),
+		// which is portable across CI environments.
+		blocker := filepath.Join(t.TempDir(), "blocker")
+		if err := os.WriteFile(blocker, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		driver.metaDir = filepath.Join(blocker, "mounts")
+
+		if _, err := driver.NodePublishVolume(context.Background(), publishReq(target)); err != nil {
+			t.Fatalf("NodePublishVolume should succeed on meta-write failure: %v", err)
+		}
+		// Any stat error is fine here — the meta file must not have been
+		// written. ENOENT is expected on non-root; ENOTDIR is what we get
+		// via the blocker-file mechanism.
+		if _, err := os.Stat(driver.efsMetaPath(target)); err == nil {
+			t.Error("meta file should not exist after meta-write failure")
+		}
+	})
+
+	t.Run("meta path is stable under filepath.Clean", func(t *testing.T) {
+		driver := newDriver(t, nil)
+		a := driver.efsMetaPath("/var/lib/kubelet/pods/uid/volumes/kubernetes.io~csi/pv/mount")
+		b := driver.efsMetaPath("/var/lib/kubelet/pods/uid/volumes/kubernetes.io~csi/pv/mount/")
+		c := driver.efsMetaPath("/var/lib/kubelet/pods/uid/volumes/kubernetes.io~csi//pv/mount")
+		if a != b || a != c {
+			t.Errorf("efsMetaPath should be stable under trailing slashes and duplicate separators:\n  a=%s\n  b=%s\n  c=%s", a, b, c)
+		}
+	})
 }
