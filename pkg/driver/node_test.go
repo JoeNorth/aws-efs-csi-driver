@@ -34,6 +34,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/golang/mock/gomock"
 	"github.com/kubernetes-sigs/aws-efs-csi-driver/pkg/driver/mocks"
+	"github.com/kubernetes-sigs/aws-efs-csi-driver/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -127,6 +128,36 @@ func TestNodePublishVolume(t *testing.T) {
 			},
 			expectMakeDir:         true,
 			mountArgs:             []interface{}{volumeId + ":/", targetPath, "efs", []string{"tls"}},
+			mountSuccess:          true,
+			volMetricsOptIn:       true,
+			maxInflightMountCalls: UnsetMaxInflightMountCounts,
+		},
+		{
+			// DNS-name volumeHandle (static PV): the fsid is passed through
+			// unchanged as the efs-utils mount source, asserted via mountArgs[0].
+			name: "success: efs dns-name volume handle",
+			req: &csi.NodePublishVolumeRequest{
+				VolumeId:         "fs-9919e11b.efs.us-east-1.amazonaws.com",
+				VolumeCapability: stdVolCap,
+				TargetPath:       targetPath,
+			},
+			expectMakeDir:         true,
+			mountArgs:             []interface{}{"fs-9919e11b.efs.us-east-1.amazonaws.com:/", targetPath, "efs", []string{"tls"}},
+			mountSuccess:          true,
+			volMetricsOptIn:       true,
+			maxInflightMountCalls: UnsetMaxInflightMountCounts,
+		},
+		{
+			// AZ-prefixed DNS-name volumeHandle (static PV): the fsid, including
+			// the leading AZ label, is passed through unchanged as the mount source.
+			name: "success: efs dns-name az-prefixed volume handle",
+			req: &csi.NodePublishVolumeRequest{
+				VolumeId:         "us-east-1a.fs-9919e11b.efs.us-east-1.amazonaws.com",
+				VolumeCapability: stdVolCap,
+				TargetPath:       targetPath,
+			},
+			expectMakeDir:         true,
+			mountArgs:             []interface{}{"us-east-1a.fs-9919e11b.efs.us-east-1.amazonaws.com:/", targetPath, "efs", []string{"tls"}},
 			mountSuccess:          true,
 			volMetricsOptIn:       true,
 			maxInflightMountCalls: UnsetMaxInflightMountCounts,
@@ -549,7 +580,7 @@ func TestNodePublishVolume(t *testing.T) {
 			expectMakeDir: false,
 			expectError: errtyp{
 				code:    "InvalidArgument",
-				message: "volume ID 'invalid-id' is invalid: Expected a file system ID of the form 'fs-[0-9a-f]{8,40}'",
+				message: "volume ID 'invalid-id' is invalid: Expected a file system ID of the form 'fs-[0-9a-f]{8,40}' or a mount-target DNS name (e.g. 'fs-abcd1234.efs.<region>.amazonaws.com')",
 			},
 			maxInflightMountCalls: UnsetMaxInflightMountCounts,
 		},
@@ -648,7 +679,7 @@ func TestNodePublishVolume(t *testing.T) {
 			expectMakeDir: false,
 			expectError: errtyp{
 				code:    "InvalidArgument",
-				message: "volume ID 'efs:invalid-id' is invalid: Expected a file system ID of the form 'fs-[0-9a-f]{8,40}'",
+				message: "volume ID 'efs:invalid-id' is invalid: Expected a file system ID of the form 'fs-[0-9a-f]{8,40}' or a mount-target DNS name (e.g. 'fs-abcd1234.efs.<region>.amazonaws.com')",
 			},
 		},
 		{
@@ -719,7 +750,7 @@ func TestNodePublishVolume(t *testing.T) {
 			expectMakeDir: false,
 			expectError: errtyp{
 				code:    "InvalidArgument",
-				message: "volume ID 's3files:invalid-id' is invalid: Expected a file system ID of the form 'fs-[0-9a-f]{8,40}'",
+				message: "volume ID 's3files:invalid-id' is invalid: Expected a file system ID of the form 'fs-[0-9a-f]{8,40}' or a mount-target DNS name (e.g. 'fs-abcd1234.efs.<region>.amazonaws.com')",
 			},
 		},
 		{
@@ -1623,6 +1654,25 @@ func TestIsValidFileSystemId(t *testing.T) {
 		{"invalid: empty", "", false},
 		{"invalid: prefix only", "fs-", false},
 		{"invalid: attack with mount options", "fs-attacktest,exec,suid,dev", false},
+		// DNS-name form used in static PV volumeHandles. Validation is structural
+		// (optional AZ label, strict fs-<hex> id label, DNS-safe domain) rather
+		// than enumerating known domains, so EFS bare, EFS AZ-prefixed, and S3
+		// Files forms are all covered while still blocking mount-option injection.
+		{"valid: efs dns-name", "fs-9919e11b.efs.us-east-1.amazonaws.com", true},
+		{"valid: efs dns-name az-prefixed", "us-east-1a.fs-9919e11b.efs.us-east-1.amazonaws.com", true},
+		{"valid: s3files dns-name", "use1-az1.fs-0123456abcdef0189.s3files.us-east-1.on.aws", true},
+		{"valid: dns-name china", "fs-12345678.efs.cn-north-1.amazonaws.com.cn", true},
+		{"valid: dns-name fips", "fs-12345678.efs-fips.us-east-1.amazonaws.com", true},
+		{"invalid: injected mount options on s3files dns-name", "use1-az1.fs-0123456abcdef0189.s3files.us-east-1.on.aws,exec,suid,dev", false},
+		{"invalid: dns-name az-prefixed id too short", "us-east-1a.fs-1234567.efs.us-east-1.amazonaws.com", false},
+		{"invalid: dns-name az-prefixed non-hex id", "us-east-1a.fs-1234567G.efs.us-east-1.amazonaws.com", false},
+		// DNS labels are case-insensitive, so an uppercase domain must be accepted,
+		// but the fs-<hex> id label itself stays strictly lowercase hex: an
+		// uppercase id label is rejected in the DNS branch just as the bare id
+		// fs-ABCDEF12 is rejected in the bare-id branch.
+		{"valid: efs dns-name uppercase domain", "fs-9919e11b.EFS.us-east-1.amazonaws.com", true},
+		{"invalid: dns-name uppercase id label", "fs-ABCDEF12.efs.us-east-1.amazonaws.com", false},
+		{"invalid: bare id uppercase hex", "fs-ABCDEF12", false},
 	}
 
 	for _, tc := range testCases {
@@ -1630,6 +1680,64 @@ func TestIsValidFileSystemId(t *testing.T) {
 			result := isValidFileSystemId(tc.fsid)
 			if result != tc.expected {
 				t.Errorf("isValidFileSystemId(%q) = %v, expected %v", tc.fsid, result, tc.expected)
+			}
+		})
+	}
+}
+
+func TestParseVolumeIdDnsName(t *testing.T) {
+	// A DNS-name volumeHandle (used in static PVs) must parse successfully, keep
+	// the fsid byte-for-byte, and produce an unchanged efs-utils mount source.
+	// Both EFS (fs-<id> as the leading label) and S3 Files (fs-<id> as a middle
+	// label with a different domain) forms are covered.
+	testCases := []struct {
+		name            string
+		volumeId        string
+		expectedFsid    string
+		expectedFsType  util.FileSystemType
+		expectedSubpath string
+	}{
+		{
+			name:            "efs dns-name",
+			volumeId:        "fs-9919e11b.efs.us-east-1.amazonaws.com",
+			expectedFsid:    "fs-9919e11b.efs.us-east-1.amazonaws.com",
+			expectedFsType:  util.FileSystemTypeEFS,
+			expectedSubpath: "/",
+		},
+		{
+			name:            "s3files dns-name",
+			volumeId:        "s3files:use1-az1.fs-0123456abcdef0189.s3files.us-east-1.on.aws",
+			expectedFsid:    "use1-az1.fs-0123456abcdef0189.s3files.us-east-1.on.aws",
+			expectedFsType:  util.FileSystemTypeS3Files,
+			expectedSubpath: "/",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsid, subpath, apid, fsType, err := parseVolumeId(tc.volumeId)
+			if err != nil {
+				t.Fatalf("parseVolumeId(%q) returned unexpected error: %v", tc.volumeId, err)
+			}
+			if fsid != tc.expectedFsid {
+				t.Errorf("parseVolumeId(%q) fsid = %q, expected %q (must be unchanged)", tc.volumeId, fsid, tc.expectedFsid)
+			}
+			if apid != "" {
+				t.Errorf("parseVolumeId(%q) apid = %q, expected empty", tc.volumeId, apid)
+			}
+			if fsType != tc.expectedFsType {
+				t.Errorf("parseVolumeId(%q) fsType = %q, expected %q", tc.volumeId, fsType, tc.expectedFsType)
+			}
+
+			// The efs-utils mount source is built in NodePublishVolume (asserted
+			// end-to-end via the gomock Mount expectation in TestNodePublishVolume).
+			// Here we only assert that parseVolumeId keeps the fsid unchanged and
+			// derives the subpath correctly, which are the inputs to that source.
+			if subpath == "" {
+				subpath = "/"
+			}
+			if subpath != tc.expectedSubpath {
+				t.Errorf("parseVolumeId(%q) subpath = %q, expected %q", tc.volumeId, subpath, tc.expectedSubpath)
 			}
 		})
 	}
