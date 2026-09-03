@@ -162,7 +162,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 				return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("Volume context property %q must be a boolean value: %v", k, err))
 			}
 		case MountTargetIp:
-			if net.ParseIP(v) == nil {
+			if !isValidMountTargetIP(v) {
 				return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("Volume context property %q=%q is not a valid IP address", k, v))
 			}
 			resolvedMountTargetIP = v
@@ -174,6 +174,14 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 			var ipMap map[string]string
 			if err := json.Unmarshal([]byte(v), &ipMap); err != nil {
 				return nil, status.Errorf(codes.InvalidArgument, "Failed to parse %s: %v", MountTargetIpMap, err)
+			}
+			// Validate every entry before selecting one, so the same map is accepted
+			// or rejected identically on every node regardless of which AZ each one
+			// resolves to.
+			for az, ip := range ipMap {
+				if !isValidMountTargetIP(ip) {
+					return nil, status.Errorf(codes.InvalidArgument, "Volume context property %q has an invalid IP address %q for availability zone %q", k, ip, az)
+				}
 			}
 			nodeAZ := d.cloud.GetMetadata().GetAvailabilityZone()
 			if ip, ok := ipMap[nodeAZ]; ok {
@@ -723,6 +731,15 @@ func isValidFileSystemId(filesystemId string) bool {
 
 func isValidAccessPointId(accesspointId string) bool {
 	return strings.HasPrefix(accesspointId, "fsap-") && hexSuffixRegex.MatchString(accesspointId[5:])
+}
+
+// isValidMountTargetIP reports whether value is a bare IPv4 or IPv6 address.
+// Mount target IPs are concatenated into the comma-separated list passed to
+// mount(8) as -o, so a value carrying a separator would be read as additional
+// mount options. This constrains the shape of the address only; it does not
+// check that the address belongs to a mount target of the file system.
+func isValidMountTargetIP(value string) bool {
+	return net.ParseIP(value) != nil
 }
 
 // Struct for JSON patch operations

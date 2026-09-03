@@ -35,6 +35,8 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/kubernetes-sigs/aws-efs-csi-driver/pkg/driver/mocks"
 	"github.com/kubernetes-sigs/aws-efs-csi-driver/pkg/util"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -552,6 +554,37 @@ func TestNodePublishVolume(t *testing.T) {
 			expectError: errtyp{
 				code:    "InvalidArgument",
 				message: "Volume context property asdf not supported.",
+			},
+			maxInflightMountCalls: UnsetMaxInflightMountCounts,
+		},
+		{
+			// A comma would otherwise be joined into the -o list as extra mount options.
+			name: "fail: mounttargetip carrying additional mount options",
+			req: &csi.NodePublishVolumeRequest{
+				VolumeId:         volumeId,
+				VolumeCapability: stdVolCap,
+				TargetPath:       targetPath,
+				VolumeContext:    map[string]string{"mounttargetip": "10.0.0.1,uid=0,gid=0,port=12345"},
+			},
+			expectMakeDir: false,
+			expectError: errtyp{
+				code:    "InvalidArgument",
+				message: `Volume context property "mounttargetip"="10.0.0.1,uid=0,gid=0,port=12345" is not a valid IP address`,
+			},
+			maxInflightMountCalls: UnsetMaxInflightMountCounts,
+		},
+		{
+			name: "fail: mounttargetip that is not an IP address",
+			req: &csi.NodePublishVolumeRequest{
+				VolumeId:         volumeId,
+				VolumeCapability: stdVolCap,
+				TargetPath:       targetPath,
+				VolumeContext:    map[string]string{"mounttargetip": "not-an-ip"},
+			},
+			expectMakeDir: false,
+			expectError: errtyp{
+				code:    "InvalidArgument",
+				message: `Volume context property "mounttargetip"="not-an-ip" is not a valid IP address`,
 			},
 			maxInflightMountCalls: UnsetMaxInflightMountCounts,
 		},
@@ -1743,6 +1776,35 @@ func TestParseVolumeIdDnsName(t *testing.T) {
 	}
 }
 
+func TestIsValidMountTargetIP(t *testing.T) {
+	testCases := []struct {
+		name     string
+		value    string
+		expected bool
+	}{
+		{"valid: IPv4", "10.0.1.1", true},
+		{"valid: IPv6", "2600:1f14:abc:1234::1", true},
+		{"valid: IPv6 loopback", "::1", true},
+		{"invalid: trailing mount options", "10.0.1.1,uid=0,gid=0,port=12345", false},
+		{"invalid: leading mount option", "uid=0,10.0.1.1", false},
+		{"invalid: whitespace separated option", "10.0.1.1 uid=0", false},
+		{"invalid: hostname", "fs-abcd1234.efs.us-east-1.amazonaws.com", false},
+		{"invalid: not an IP", "not-an-ip", false},
+		{"invalid: empty", "", false},
+		{"invalid: IPv4 with port", "10.0.1.1:2049", false},
+		{"invalid: CIDR", "10.0.1.0/24", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := isValidMountTargetIP(tc.value)
+			if result != tc.expected {
+				t.Errorf("isValidMountTargetIP(%q) = %v, expected %v", tc.value, result, tc.expected)
+			}
+		})
+	}
+}
+
 func TestGetCsiNodeEfsPluginContainerMemoryLimitInBytes(t *testing.T) {
 	testCases := []struct {
 		name     string
@@ -1786,6 +1848,11 @@ func TestNodePublishVolumeMountTargetIpMap(t *testing.T) {
 		// expected mounttargetip value in mount options, empty if none expected
 		expectedIP  string
 		expectError bool
+		// substring the error must contain, checked only when set
+		expectErrContains string
+		// gRPC code the error must carry, checked only when set. kubelet retry
+		// behavior depends on this, so a rejection is not enough on its own.
+		expectErrCode codes.Code
 	}{
 		{
 			name:       "node AZ found in map",
@@ -1804,6 +1871,74 @@ func TestNodePublishVolumeMountTargetIpMap(t *testing.T) {
 			nodeAZ:      "us-west-2a",
 			ipMapJSON:   `{invalid`,
 			expectError: true,
+		},
+		{
+			name:              "comma in the node AZ value is rejected instead of injecting mount options",
+			nodeAZ:            "us-west-2a",
+			ipMapJSON:         `{"us-west-2a":"10.0.1.1,uid=0,gid=0,port=12345"}`,
+			expectError:       true,
+			expectErrCode:     codes.InvalidArgument,
+			expectErrContains: `has an invalid IP address "10.0.1.1,uid=0,gid=0,port=12345" for availability zone "us-west-2a"`,
+		},
+		{
+			// The entry this node would not have selected is still rejected, so a
+			// tampered map cannot mount on some nodes and inject on others.
+			name:              "comma in another AZ value is rejected even though this node resolves elsewhere",
+			nodeAZ:            "us-west-2b",
+			ipMapJSON:         `{"us-west-2a":"10.0.1.1,uid=0","us-west-2b":"10.0.2.1"}`,
+			expectError:       true,
+			expectErrCode:     codes.InvalidArgument,
+			expectErrContains: `has an invalid IP address "10.0.1.1,uid=0" for availability zone "us-west-2a"`,
+		},
+		{
+			// The escape is decoded before validation, so escaping the separator
+			// does not get it past the check.
+			name:              "unicode-escaped comma is rejected",
+			nodeAZ:            "us-west-2a",
+			ipMapJSON:         `{"us-west-2a":"10.0.1.1\u002cuid=0"}`,
+			expectError:       true,
+			expectErrCode:     codes.InvalidArgument,
+			expectErrContains: `has an invalid IP address "10.0.1.1,uid=0"`,
+		},
+		{
+			name:              "non-IP value is rejected",
+			nodeAZ:            "us-west-2a",
+			ipMapJSON:         `{"us-west-2a":"not-an-ip"}`,
+			expectError:       true,
+			expectErrCode:     codes.InvalidArgument,
+			expectErrContains: `has an invalid IP address "not-an-ip"`,
+		},
+		{
+			name:              "empty value is rejected",
+			nodeAZ:            "us-west-2a",
+			ipMapJSON:         `{"us-west-2a":""}`,
+			expectError:       true,
+			expectErrCode:     codes.InvalidArgument,
+			expectErrContains: `has an invalid IP address ""`,
+		},
+		{
+			// JSON null decodes to the empty string rather than failing to unmarshal.
+			name:              "null value is rejected",
+			nodeAZ:            "us-west-2a",
+			ipMapJSON:         `{"us-west-2a":null}`,
+			expectError:       true,
+			expectErrCode:     codes.InvalidArgument,
+			expectErrContains: `has an invalid IP address ""`,
+		},
+		{
+			// A type error leaves the map partially populated, so the unmarshal error
+			// must be returned before any entry is read.
+			name:          "non-string value is rejected before the map is used",
+			nodeAZ:        "us-west-2a",
+			ipMapJSON:     `{"us-west-2a":"10.0.1.1","us-west-2b":123}`,
+			expectError:   true,
+			expectErrCode: codes.InvalidArgument,
+		},
+		{
+			name:       "IPv6 address is accepted",
+			nodeAZ:     "us-west-2a",
+			ipMapJSON:  `{"us-west-2a":"2600:1f14:abc:1234::1"}`,
+			expectedIP: "2600:1f14:abc:1234::1",
 		},
 	}
 
@@ -1848,6 +1983,12 @@ func TestNodePublishVolumeMountTargetIpMap(t *testing.T) {
 			if tc.expectError {
 				if err == nil {
 					t.Fatal("Expected error but got nil")
+				}
+				if tc.expectErrCode != codes.OK && status.Code(err) != tc.expectErrCode {
+					t.Fatalf("Expected gRPC code %v, got %v (%v)", tc.expectErrCode, status.Code(err), err)
+				}
+				if tc.expectErrContains != "" && !strings.Contains(err.Error(), tc.expectErrContains) {
+					t.Fatalf("Expected error containing %q, got %q", tc.expectErrContains, err.Error())
 				}
 			} else {
 				if err != nil {
